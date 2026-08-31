@@ -246,7 +246,7 @@ def load_all_sheets_live(file_path):
                 rename_dict[col] = 'buyFromVendorNo'
             elif clean_col in ['suppliername', 'buyfromvendorname', 'buyfromvendornam', 'vendorname', 'name']:
                 rename_dict[col] = 'buyFromVendorName'
-            elif clean_col in ['no', 'documentno', 'prono', 'number', 'purchasereturnorderno']:
+            elif clean_col in ['no', 'documentno', 'prono', 'number', 'purchasereturnorderno', 'documentnumber']:
                 rename_dict[col] = 'no' 
             elif clean_col in ['reason', 'returnreason', 'discrepancyreason', 'cause']:
                 rename_dict[col] = 'reason'
@@ -1763,12 +1763,14 @@ elif page == "Vendor SLA & Escalation Hub":
                 },
                 title="Average SLA Closure Speed (Days) by Vendor"
             )
+            fig_sla.update_traces(hovertemplate='%{y}: %{x:,.1f} Days<extra></extra>')
             fig_sla.update_layout(
                 yaxis_title="", 
                 xaxis_title="Average Turnaround Time (Days)", 
                 plot_bgcolor='rgba(0,0,0,0)',
                 paper_bgcolor='rgba(0,0,0,0)',
-                font=dict(family="Inter, sans-serif")
+                font=dict(family="Inter, sans-serif"),
+                xaxis=dict(tickformat=',')
             )
             st.plotly_chart(fig_sla, use_container_width=True)
 
@@ -1844,6 +1846,7 @@ elif page == "Vendor SLA & Escalation Hub":
                     title="Financial Exposure Breakdown by Problem Reason & Warehouse Location"
                 )
                 fig_rc.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+                fig_rc.update_traces(texttemplate='%{label}<br>%{value:,.0f} SAR', hovertemplate='%{label}<br>%{value:,.2f} SAR<extra></extra>')
                 st.plotly_chart(fig_rc, use_container_width=True)
 
             with rc_c2:
@@ -1901,11 +1904,22 @@ elif page == "Vendor SLA & Escalation Hub":
             issues_all = df_issues.copy()
             issues_all['no'] = issues_all['no'].astype(str)
 
-            value_col = 'cost_inc_vat' if 'cost_inc_vat' in issues_all.columns else (
+            # 'cost' / 'cost_inc_vat' are PER-UNIT prices, not the line
+            # total — the real financial exposure of a discrepancy line is
+            # unit price x missing_quantity. Using cost_inc_vat alone
+            # understates true exposure by ~60x on this data.
+            unit_price_col = 'cost_inc_vat' if 'cost_inc_vat' in issues_all.columns else (
                 'cost' if 'cost' in issues_all.columns else None
             )
-            if value_col:
-                issues_all[value_col] = pd.to_numeric(issues_all[value_col], errors='coerce').fillna(0.0)
+            value_col = None
+            if unit_price_col and 'missing_quantity' in issues_all.columns:
+                issues_all[unit_price_col] = pd.to_numeric(issues_all[unit_price_col], errors='coerce').fillna(0.0)
+                issues_all['missing_quantity'] = pd.to_numeric(issues_all['missing_quantity'], errors='coerce').fillna(0.0)
+                issues_all['Line_Exposure'] = issues_all[unit_price_col] * issues_all['missing_quantity']
+                value_col = 'Line_Exposure'
+            elif unit_price_col:
+                issues_all[unit_price_col] = pd.to_numeric(issues_all[unit_price_col], errors='coerce').fillna(0.0)
+                value_col = unit_price_col
             if 'mi.created_at' in issues_all.columns:
                 issues_all['mi.created_at'] = pd.to_datetime(issues_all['mi.created_at'], errors='coerce')
 
@@ -1947,7 +1961,8 @@ elif page == "Vendor SLA & Escalation Hub":
                 c1.metric("PROs Represented", f"{distinct_pros:,}", f"{total_lines:,} discrepancy line items")
                 c2.metric("Vendors Involved", f"{distinct_vendors:,}")
                 c3.metric("Most Common Reason", top_reason_name, f"{top_reason_share:.1f}% of all line items")
-                c4.metric("Total Logged Exposure", f"{total_value:,.2f} SAR" if value_col else "N/A")
+                c4.metric("Total Logged Exposure", f"{total_value:,.2f} SAR" if value_col else "N/A",
+                          "Unit price x missing qty" if value_col == 'Line_Exposure' else None)
 
                 st.markdown("---")
 
@@ -1960,11 +1975,14 @@ elif page == "Vendor SLA & Escalation Hub":
                     fig_reason = px.bar(
                         reason_counts, x='Line Items', y='Reason', orientation='h',
                         color='Line Items', color_continuous_scale='Reds',
-                        title="Discrepancy Reason Frequency (Item-Level)"
+                        title="Discrepancy Reason Frequency (Item-Level)",
+                        text='Line Items'
                     )
+                    fig_reason.update_traces(texttemplate='%{text:,}', textposition='outside', hovertemplate='%{y}: %{x:,}<extra></extra>')
                     fig_reason.update_layout(
                         yaxis_title="", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                        font=dict(family="Inter, sans-serif"), coloraxis_showscale=False
+                        font=dict(family="Inter, sans-serif"), coloraxis_showscale=False,
+                        xaxis=dict(tickformat=',')
                     )
                     st.plotly_chart(fig_reason, use_container_width=True)
 
@@ -1979,11 +1997,14 @@ elif page == "Vendor SLA & Escalation Hub":
                     fig_vendor_count = px.bar(
                         vendor_pro_counts.sort_values('PRO_Count'), x='PRO_Count', y='Vendor_Label', orientation='h',
                         color='PRO_Count', color_continuous_scale='Oranges',
-                        title="Top 10 Vendors by Number of PROs Caused"
+                        title="Top 10 Vendors by Number of PROs Caused",
+                        text='PRO_Count'
                     )
+                    fig_vendor_count.update_traces(texttemplate='%{text:,}', textposition='outside', hovertemplate='%{y}: %{x:,}<extra></extra>')
                     fig_vendor_count.update_layout(
                         yaxis_title="", xaxis_title="Distinct PROs", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                        font=dict(family="Inter, sans-serif"), coloraxis_showscale=False
+                        font=dict(family="Inter, sans-serif"), coloraxis_showscale=False,
+                        xaxis=dict(tickformat=',')
                     )
                     st.plotly_chart(fig_vendor_count, use_container_width=True)
 
@@ -2001,11 +2022,14 @@ elif page == "Vendor SLA & Escalation Hub":
                         fig_vendor_value = px.bar(
                             vendor_value.sort_values('Exposure'), x='Exposure', y='Vendor_Label', orientation='h',
                             color='Exposure', color_continuous_scale='Purples',
-                            title="Top 10 Vendors by Logged Financial Exposure (SAR)"
+                            title="Top 10 Vendors by Logged Financial Exposure (SAR)",
+                            text='Exposure'
                         )
+                        fig_vendor_value.update_traces(texttemplate='%{text:,.0f}', textposition='outside', hovertemplate='%{y}: %{x:,.2f} SAR<extra></extra>')
                         fig_vendor_value.update_layout(
                             yaxis_title="", xaxis_title="Exposure (SAR)", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                            font=dict(family="Inter, sans-serif"), coloraxis_showscale=False
+                            font=dict(family="Inter, sans-serif"), coloraxis_showscale=False,
+                            xaxis=dict(tickformat=',')
                         )
                         st.plotly_chart(fig_vendor_value, use_container_width=True)
 
@@ -2017,11 +2041,14 @@ elif page == "Vendor SLA & Escalation Hub":
                         fig_loc = px.bar(
                             loc_counts, x='Line Items', y='Warehouse', orientation='h',
                             color='Line Items', color_continuous_scale='Blues',
-                            title="Top 10 Warehouse Locations by Issue Count"
+                            title="Top 10 Warehouse Locations by Issue Count",
+                            text='Line Items'
                         )
+                        fig_loc.update_traces(texttemplate='%{text:,}', textposition='outside', hovertemplate='%{y}: %{x:,}<extra></extra>')
                         fig_loc.update_layout(
                             yaxis_title="", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                            font=dict(family="Inter, sans-serif"), coloraxis_showscale=False
+                            font=dict(family="Inter, sans-serif"), coloraxis_showscale=False,
+                            xaxis=dict(tickformat=',')
                         )
                         st.plotly_chart(fig_loc, use_container_width=True)
 
@@ -2034,9 +2061,11 @@ elif page == "Vendor SLA & Escalation Hub":
                         trend, x='Month', y='Line Items', color='reason', markers=True,
                         title="Monthly Discrepancy Volume by Reason"
                     )
+                    fig_trend.update_traces(hovertemplate='%{x}: %{y:,}<extra></extra>')
                     fig_trend.update_layout(
                         plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                        font=dict(family="Inter, sans-serif")
+                        font=dict(family="Inter, sans-serif"),
+                        yaxis=dict(tickformat=',')
                     )
                     st.plotly_chart(fig_trend, use_container_width=True)
 
@@ -2051,7 +2080,58 @@ elif page == "Vendor SLA & Escalation Hub":
                     pivot = vendor_reason_matrix.pivot_table(
                         index=['buyFromVendorNo', 'buyFromVendorName'], columns='reason', values='PRO_Count', fill_value=0
                     ).reset_index()
-                    st.dataframe(pivot, use_container_width=True, hide_index=True)
+
+                    # -- Still-open PROs per vendor, per 'Linked_With_PO' --
+                    linked_pro_nos_matrix = (
+                        set(df_linked['no'].astype(str).str.strip().str.upper())
+                        if (not df_linked.empty and 'no' in df_linked.columns) else set()
+                    )
+                    open_pending_per_vendor = (
+                        matrix_src[matrix_src['no'].isin(linked_pro_nos_matrix)]
+                        .groupby('buyFromVendorNo')['no'].nunique()
+                    )
+
+                    # -- Total closed amount per vendor (from the Closed sheet) --
+                    closed_amount_per_vendor = (
+                        closed_base.groupby('buyFromVendorNo')['amountIncludingVAT'].sum()
+                        if not closed_base.empty else pd.Series(dtype=float)
+                    )
+
+                    # -- Total logged exposure per vendor (unit price x missing qty), full population --
+                    exposure_per_vendor = (
+                        issues_f.groupby('buyFromVendorNo')[value_col].sum()
+                        if value_col else pd.Series(dtype=float)
+                    )
+
+                    pivot['Open_Pending_PROs (Linked_With_PO)'] = pivot['buyFromVendorNo'].map(open_pending_per_vendor).fillna(0).astype(int)
+                    pivot['Closed_Amount_SAR'] = pivot['buyFromVendorNo'].map(closed_amount_per_vendor).fillna(0.0)
+                    pivot['Total_Logged_Exposure_SAR'] = pivot['buyFromVendorNo'].map(exposure_per_vendor).fillna(0.0)
+                    pivot['Closed_%_of_Exposure'] = pivot.apply(
+                        lambda r: (r['Closed_Amount_SAR'] / r['Total_Logged_Exposure_SAR'] * 100) if r['Total_Logged_Exposure_SAR'] > 0 else 0.0,
+                        axis=1
+                    )
+
+                    st.caption(
+                        "`Open_Pending_PROs`: distinct PRO numbers for this vendor currently sitting in `Linked_With_PO` "
+                        "(matched to a PO for offsetting but not yet closed). `Closed_Amount_SAR`: this vendor's total "
+                        "closed value from the `Closed` sheet (all-time, not limited to the reason filter above). "
+                        "`Closed_%_of_Exposure`: that closed amount as a share of the vendor's Total Logged Exposure "
+                        "(unit price × missing quantity, from the filtered discrepancy log). Note this ratio can exceed "
+                        "100% — `Closed_Amount_SAR` covers the vendor's full closed-PRO value (including PROs that were "
+                        "never logged with an item-level reason), while `Total_Logged_Exposure_SAR` only reflects line "
+                        "items that were specifically logged in `pro_with_issues_linked_with_po_`, so it will often "
+                        "under-cover the true closed value — a ratio above 100% is expected, not an error."
+                    )
+
+                    st.dataframe(
+                        pivot, use_container_width=True, hide_index=True,
+                        column_config={
+                            "Open_Pending_PROs (Linked_With_PO)": st.column_config.NumberColumn(format="%,d"),
+                            "Closed_Amount_SAR": st.column_config.NumberColumn("Closed Amount (SAR)", format="%,.2f"),
+                            "Total_Logged_Exposure_SAR": st.column_config.NumberColumn("Total Logged Exposure (SAR)", format="%,.2f"),
+                            "Closed_%_of_Exposure": st.column_config.NumberColumn("Closed % of Exposure", format="%.1f%%"),
+                        }
+                    )
 
                 st.download_button(
                     label="Download Filtered PRO Creation Data (CSV)",
