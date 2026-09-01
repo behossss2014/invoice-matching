@@ -1705,11 +1705,12 @@ elif page == "Vendor SLA & Escalation Hub":
 
     st.markdown("---")
 
-    sla_tab1, sla_tab2, sla_tab3, sla_tab4 = st.tabs([
+    sla_tab1, sla_tab2, sla_tab3, sla_tab4, sla_tab5 = st.tabs([
         "1. Vendor SLA & Speed Scorecard", 
         "2. Root Cause & Value Exposure", 
         "3. PRO Creation Deep-Dive (Who & Why)",
-        "4. Smart Offsetting & Escalation"
+        "4. Smart Offsetting & Escalation",
+        "5. Recurring Item Analysis"
     ])
 
     # ------------------------------------------
@@ -1970,41 +1971,67 @@ elif page == "Vendor SLA & Escalation Hub":
 
                 with dd1:
                     st.markdown("#### Which reason is most common? (all 6 causes)")
-                    reason_counts = issues_f['reason'].value_counts().reset_index()
-                    reason_counts.columns = ['Reason', 'Line Items']
+                    reason_agg = issues_f.groupby('reason').agg(
+                        Line_Items=('reason', 'count'),
+                        PRO_Count=('no', 'nunique'),
+                        Total_Value=(value_col, 'sum') if value_col else ('reason', 'count')
+                    ).reset_index().sort_values('Line_Items', ascending=False)
                     fig_reason = px.bar(
-                        reason_counts, x='Line Items', y='Reason', orientation='h',
-                        color='Line Items', color_continuous_scale='Reds',
+                        reason_agg, x='Line_Items', y='reason', orientation='h',
+                        color='Line_Items', color_continuous_scale='Reds',
                         title="Discrepancy Reason Frequency (Item-Level)",
-                        text='Line Items'
+                        custom_data=['PRO_Count', 'Total_Value'] if value_col else ['PRO_Count']
                     )
-                    fig_reason.update_traces(texttemplate='%{text:,}', textposition='outside', hovertemplate='%{y}: %{x:,}<extra></extra>')
+                    if value_col:
+                        fig_reason.update_traces(
+                            texttemplate='%{x:,} items | %{customdata[0]:,} PROs | %{customdata[1]:,.0f} SAR',
+                            textposition='outside',
+                            hovertemplate='%{y}<br>%{x:,} line items<br>%{customdata[0]:,} PROs<br>%{customdata[1]:,.2f} SAR<extra></extra>'
+                        )
+                    else:
+                        fig_reason.update_traces(
+                            texttemplate='%{x:,} items | %{customdata[0]:,} PROs',
+                            textposition='outside',
+                            hovertemplate='%{y}<br>%{x:,} line items<br>%{customdata[0]:,} PROs<extra></extra>'
+                        )
                     fig_reason.update_layout(
-                        yaxis_title="", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                        yaxis_title="", xaxis_title="Line Items", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                         font=dict(family="Inter, sans-serif"), coloraxis_showscale=False,
-                        xaxis=dict(tickformat=',')
+                        xaxis=dict(tickformat=',', range=[0, reason_agg['Line_Items'].max() * 1.35])
                     )
                     st.plotly_chart(fig_reason, use_container_width=True)
 
                 with dd2:
-                    st.markdown("#### Which vendor creates the most PROs?")
-                    vendor_pro_counts = (
-                        issues_f.groupby(['buyFromVendorNo', 'buyFromVendorName'])['no']
-                        .nunique().reset_index(name='PRO_Count')
-                        .sort_values('PRO_Count', ascending=False).head(10)
+                    h2a, h2b = st.columns([3, 1])
+                    with h2a:
+                        st.markdown("#### Which vendor creates the most PROs?")
+                    with h2b:
+                        top_n_vc = st.number_input("Top N", min_value=3, max_value=50, value=10, step=1,
+                                                    key="topn_vendor_count", label_visibility="collapsed")
+                    vendor_pro_counts_full = (
+                        issues_f.groupby(['buyFromVendorNo', 'buyFromVendorName'])
+                        .agg(PRO_Count=('no', 'nunique'), Total_Value=(value_col, 'sum') if value_col else ('no', 'nunique'))
+                        .reset_index().sort_values('PRO_Count', ascending=False)
                     )
+                    vendor_pro_counts = vendor_pro_counts_full.head(top_n_vc).copy()
                     vendor_pro_counts['Vendor_Label'] = vendor_pro_counts['buyFromVendorNo'] + " - " + vendor_pro_counts['buyFromVendorName']
                     fig_vendor_count = px.bar(
                         vendor_pro_counts.sort_values('PRO_Count'), x='PRO_Count', y='Vendor_Label', orientation='h',
                         color='PRO_Count', color_continuous_scale='Oranges',
-                        title="Top 10 Vendors by Number of PROs Caused",
-                        text='PRO_Count'
+                        title=f"Top {top_n_vc} Vendors by Number of PROs Caused",
+                        custom_data=['Total_Value'] if value_col else None
                     )
-                    fig_vendor_count.update_traces(texttemplate='%{text:,}', textposition='outside', hovertemplate='%{y}: %{x:,}<extra></extra>')
+                    if value_col:
+                        fig_vendor_count.update_traces(
+                            texttemplate='%{x:,} PROs | %{customdata[0]:,.0f} SAR', textposition='outside',
+                            hovertemplate='%{y}<br>%{x:,} PROs<br>%{customdata[0]:,.2f} SAR<extra></extra>'
+                        )
+                    else:
+                        fig_vendor_count.update_traces(texttemplate='%{x:,} PROs', textposition='outside', hovertemplate='%{y}: %{x:,} PROs<extra></extra>')
                     fig_vendor_count.update_layout(
                         yaxis_title="", xaxis_title="Distinct PROs", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                         font=dict(family="Inter, sans-serif"), coloraxis_showscale=False,
-                        xaxis=dict(tickformat=',')
+                        xaxis=dict(tickformat=',', range=[0, vendor_pro_counts['PRO_Count'].max() * 1.4] if not vendor_pro_counts.empty else None)
                     )
                     st.plotly_chart(fig_vendor_count, use_container_width=True)
 
@@ -2012,43 +2039,72 @@ elif page == "Vendor SLA & Escalation Hub":
 
                 with dd3:
                     if value_col:
-                        st.markdown("#### Which vendor has the highest financial exposure?")
-                        vendor_value = (
-                            issues_f.groupby(['buyFromVendorNo', 'buyFromVendorName'])[value_col]
-                            .sum().reset_index(name='Exposure')
-                            .sort_values('Exposure', ascending=False).head(10)
+                        h3a, h3b = st.columns([3, 1])
+                        with h3a:
+                            st.markdown("#### Which vendor has the highest financial exposure?")
+                        with h3b:
+                            top_n_vv = st.number_input("Top N", min_value=3, max_value=50, value=10, step=1,
+                                                        key="topn_vendor_value", label_visibility="collapsed")
+                        vendor_value_full = (
+                            issues_f.groupby(['buyFromVendorNo', 'buyFromVendorName'])
+                            .agg(Exposure=(value_col, 'sum'), PRO_Count=('no', 'nunique'))
+                            .reset_index().sort_values('Exposure', ascending=False)
                         )
+                        vendor_value = vendor_value_full.head(top_n_vv).copy()
                         vendor_value['Vendor_Label'] = vendor_value['buyFromVendorNo'] + " - " + vendor_value['buyFromVendorName']
                         fig_vendor_value = px.bar(
                             vendor_value.sort_values('Exposure'), x='Exposure', y='Vendor_Label', orientation='h',
                             color='Exposure', color_continuous_scale='Purples',
-                            title="Top 10 Vendors by Logged Financial Exposure (SAR)",
-                            text='Exposure'
+                            title=f"Top {top_n_vv} Vendors by Logged Financial Exposure (SAR)",
+                            custom_data=['PRO_Count']
                         )
-                        fig_vendor_value.update_traces(texttemplate='%{text:,.0f}', textposition='outside', hovertemplate='%{y}: %{x:,.2f} SAR<extra></extra>')
+                        fig_vendor_value.update_traces(
+                            texttemplate='%{x:,.0f} SAR | %{customdata[0]:,} PROs', textposition='outside',
+                            hovertemplate='%{y}<br>%{x:,.2f} SAR<br>%{customdata[0]:,} PROs<extra></extra>'
+                        )
                         fig_vendor_value.update_layout(
                             yaxis_title="", xaxis_title="Exposure (SAR)", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                             font=dict(family="Inter, sans-serif"), coloraxis_showscale=False,
-                            xaxis=dict(tickformat=',')
+                            xaxis=dict(tickformat=',', range=[0, vendor_value['Exposure'].max() * 1.4] if not vendor_value.empty else None)
                         )
                         st.plotly_chart(fig_vendor_value, use_container_width=True)
 
                 with dd4:
                     if 'location_code' in issues_f.columns:
-                        st.markdown("#### Which warehouse locations are affected most?")
-                        loc_counts = issues_f['location_code'].value_counts().head(10).reset_index()
-                        loc_counts.columns = ['Warehouse', 'Line Items']
-                        fig_loc = px.bar(
-                            loc_counts, x='Line Items', y='Warehouse', orientation='h',
-                            color='Line Items', color_continuous_scale='Blues',
-                            title="Top 10 Warehouse Locations by Issue Count",
-                            text='Line Items'
+                        h4a, h4b = st.columns([3, 1])
+                        with h4a:
+                            st.markdown("#### Which warehouse locations are affected most?")
+                        with h4b:
+                            top_n_loc = st.number_input("Top N", min_value=3, max_value=50, value=10, step=1,
+                                                         key="topn_location", label_visibility="collapsed")
+                        loc_agg_full = (
+                            issues_f.groupby('location_code')
+                            .agg(Line_Items=('location_code', 'count'), PRO_Count=('no', 'nunique'),
+                                 Total_Value=(value_col, 'sum') if value_col else ('location_code', 'count'))
+                            .reset_index().sort_values('Line_Items', ascending=False)
                         )
-                        fig_loc.update_traces(texttemplate='%{text:,}', textposition='outside', hovertemplate='%{y}: %{x:,}<extra></extra>')
+                        loc_agg = loc_agg_full.head(top_n_loc).copy()
+                        fig_loc = px.bar(
+                            loc_agg.sort_values('Line_Items'), x='Line_Items', y='location_code', orientation='h',
+                            color='Line_Items', color_continuous_scale='Blues',
+                            title=f"Top {top_n_loc} Warehouse Locations by Issue Count",
+                            custom_data=['PRO_Count', 'Total_Value'] if value_col else ['PRO_Count']
+                        )
+                        if value_col:
+                            fig_loc.update_traces(
+                                texttemplate='%{x:,} items | %{customdata[0]:,} PROs | %{customdata[1]:,.0f} SAR',
+                                textposition='outside',
+                                hovertemplate='%{y}<br>%{x:,} items<br>%{customdata[0]:,} PROs<br>%{customdata[1]:,.2f} SAR<extra></extra>'
+                            )
+                        else:
+                            fig_loc.update_traces(
+                                texttemplate='%{x:,} items | %{customdata[0]:,} PROs', textposition='outside',
+                                hovertemplate='%{y}<br>%{x:,} items<br>%{customdata[0]:,} PROs<extra></extra>'
+                            )
                         fig_loc.update_layout(
-                            yaxis_title="", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                            yaxis_title="", xaxis_title="Line Items", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                             font=dict(family="Inter, sans-serif"), coloraxis_showscale=False,
-                            xaxis=dict(tickformat=',')
+                            xaxis=dict(tickformat=',', range=[0, loc_agg['Line_Items'].max() * 1.5] if not loc_agg.empty else None)
                         )
                         st.plotly_chart(fig_loc, use_container_width=True)
 
@@ -2250,6 +2306,271 @@ elif page == "Vendor SLA & Escalation Hub":
                         st.session_state.logged_in_user
                     )
                     st.success("Offsetting action logged into system audit trail.")
+
+    # ------------------------------------------
+    # TAB 5: RECURRING ITEM ANALYSIS
+    # ------------------------------------------
+    # Answers: does a specific ITEM keep coming back as a return? For which
+    # reason(s)? Does the same VENDOR repeat the same problem with that item,
+    # and how many times? Is there a detectable timing pattern (e.g. this
+    # item recurs roughly every N days from this vendor)?
+    # ------------------------------------------
+    with sla_tab5:
+        st.subheader("Recurring Item Analysis — Which SKUs Keep Coming Back, and Why")
+        st.write(
+            "Item-level recurrence analysis from `pro_with_issues_linked_with_po_`: which specific items are "
+            "returned again and again, their dominant reason, whether the same vendor repeats the same problem "
+            "with that item, and whether there's a visible timing pattern."
+        )
+
+        if df_issues.empty or 'item_no' not in df_issues.columns:
+            st.info("The 'pro_with_issues_linked_with_po_' sheet has no item-level detail, so recurrence analysis cannot be computed.")
+        else:
+            item_src = df_issues.copy()
+            item_src['no'] = item_src['no'].astype(str)
+            item_src['item_no'] = item_src['item_no'].astype(str).replace('nan', pd.NA)
+            item_src = item_src.dropna(subset=['item_no'])
+
+            value_col_ri = 'cost_inc_vat' if 'cost_inc_vat' in item_src.columns else None
+            qty_col_ri = 'missing_quantity' if 'missing_quantity' in item_src.columns else None
+            if value_col_ri:
+                item_src[value_col_ri] = pd.to_numeric(item_src[value_col_ri], errors='coerce').fillna(0.0)
+            if qty_col_ri:
+                item_src[qty_col_ri] = pd.to_numeric(item_src[qty_col_ri], errors='coerce').fillna(0.0)
+            item_src['Line_Exposure'] = (item_src[value_col_ri] * item_src[qty_col_ri]) if (value_col_ri and qty_col_ri) else 0.0
+            if 'mi.created_at' in item_src.columns:
+                item_src['mi.created_at'] = pd.to_datetime(item_src['mi.created_at'], errors='coerce')
+            item_name_col = 'mi.name' if 'mi.name' in item_src.columns else None
+
+            # ---- Filters ----
+            rf1, rf2, rf3 = st.columns(3)
+            with rf1:
+                min_recur = st.number_input("Minimum times returned:", min_value=2, max_value=50, value=3, step=1, key="ri_min_recur")
+            with rf2:
+                ri_reason_opts = sorted(item_src['reason'].dropna().unique().tolist())
+                ri_reason_pick = st.multiselect("Filter by Reason:", options=ri_reason_opts, default=ri_reason_opts, key="ri_reason_filter")
+            with rf3:
+                ri_vendor_search = st.text_input("Search Vendor Name/Code:", key="ri_vendor_search").strip().lower()
+
+            item_f = item_src[item_src['reason'].isin(ri_reason_pick)].copy()
+            if ri_vendor_search:
+                code_m = item_f['buyFromVendorNo'].str.lower().str.contains(ri_vendor_search, na=False) if 'buyFromVendorNo' in item_f.columns else False
+                name_m = item_f['buyFromVendorName'].str.lower().str.contains(ri_vendor_search, na=False) if 'buyFromVendorName' in item_f.columns else False
+                item_f = item_f[code_m | name_m]
+
+            if item_f.empty:
+                st.warning("No records match the selected filters.")
+            else:
+                # ---- Per-item recurrence summary ----
+                def _mode_or_na(s):
+                    return s.value_counts().idxmax() if s.notna().any() and len(s) else pd.NA
+
+                agg_dict = {
+                    'Occurrences': ('item_no', 'count'),
+                    'Distinct_PROs': ('no', 'nunique'),
+                    'Distinct_Vendors': ('buyFromVendorNo', 'nunique'),
+                    'Dominant_Reason': ('reason', _mode_or_na),
+                    'Dominant_Vendor_Code': ('buyFromVendorNo', _mode_or_na),
+                    'Dominant_Vendor_Name': ('buyFromVendorName', _mode_or_na),
+                    'Total_Exposure_SAR': ('Line_Exposure', 'sum'),
+                }
+                if item_name_col:
+                    agg_dict['Item_Name'] = (item_name_col, _mode_or_na)
+                if 'mi.created_at' in item_f.columns:
+                    agg_dict['First_Seen'] = ('mi.created_at', 'min')
+                    agg_dict['Last_Seen'] = ('mi.created_at', 'max')
+
+                item_summary = item_f.groupby('item_no').agg(**agg_dict).reset_index()
+
+                if 'First_Seen' in item_summary.columns and 'Last_Seen' in item_summary.columns:
+                    item_summary['Span_Days'] = (item_summary['Last_Seen'] - item_summary['First_Seen']).dt.days
+                    item_summary['Avg_Days_Between'] = item_summary.apply(
+                        lambda r: (r['Span_Days'] / (r['Occurrences'] - 1)) if r['Occurrences'] > 1 else pd.NA, axis=1
+                    )
+
+                # ---- Pull in the vendor's closure-speed classification from the
+                # Vendor SLA Scorecard (Tab 1), so we can see whether a vendor with
+                # a recurring-item problem is also slow to close the credit note
+                # (compounding issue) or fast (contained issue). ----
+                if not closed_base.empty:
+                    vendor_speed_lookup = closed_base.groupby('buyFromVendorNo')['tat_days'].mean()
+                    item_summary['Vendor_Avg_TAT_Days'] = item_summary['Dominant_Vendor_Code'].map(vendor_speed_lookup)
+                    item_summary['Vendor_Speed_Tier'] = item_summary['Vendor_Avg_TAT_Days'].apply(
+                        lambda v: assign_speed_tier(v) if pd.notna(v) else 'No Closed-PRO History'
+                    )
+                else:
+                    item_summary['Vendor_Avg_TAT_Days'] = pd.NA
+                    item_summary['Vendor_Speed_Tier'] = 'No Closed-PRO History'
+
+                recurring_items = item_summary[item_summary['Occurrences'] >= min_recur].sort_values('Occurrences', ascending=False)
+
+                total_items = item_summary['item_no'].nunique()
+                recurring_count = len(recurring_items)
+                recurring_exposure = recurring_items['Total_Exposure_SAR'].sum()
+                top_item_occ = int(recurring_items['Occurrences'].iloc[0]) if not recurring_items.empty else 0
+
+                rc1, rc2, rc3, rc4 = st.columns(4)
+                rc1.metric("Distinct Items Involved", f"{total_items:,}")
+                rc2.metric(f"Items Returned ≥ {min_recur} Times", f"{recurring_count:,}",
+                           f"{recurring_count/total_items*100:.1f}% of all items" if total_items else None)
+                rc3.metric("Most-Returned Item — Times", f"{top_item_occ:,}")
+                rc4.metric("Exposure Tied to Recurring Items", f"{recurring_exposure:,.2f} SAR")
+
+                st.markdown("---")
+
+                if recurring_items.empty:
+                    st.info(f"No item was returned {min_recur}+ times under the current filters. Try lowering the threshold.")
+                else:
+                    ch1, ch2 = st.columns([3, 1])
+                    with ch1:
+                        st.markdown("#### Most Frequently Returned Items")
+                    with ch2:
+                        top_n_ri = st.number_input("Top N", min_value=3, max_value=50, value=10, step=1,
+                                                    key="topn_recurring_items", label_visibility="collapsed")
+
+                    chart_items = recurring_items.head(top_n_ri).copy()
+                    label_col = 'Item_Name' if 'Item_Name' in chart_items.columns else 'item_no'
+                    chart_items['Item_Label'] = chart_items['item_no'].astype(str) + " - " + chart_items[label_col].astype(str).str.slice(0, 40)
+
+                    fig_recur = px.bar(
+                        chart_items.sort_values('Occurrences'), x='Occurrences', y='Item_Label', orientation='h',
+                        color='Occurrences', color_continuous_scale='Reds',
+                        title=f"Top {top_n_ri} Most-Returned Items (≥ {min_recur} times)",
+                        custom_data=['Distinct_PROs', 'Total_Exposure_SAR', 'Dominant_Reason', 'Dominant_Vendor_Name']
+                    )
+                    fig_recur.update_traces(
+                        texttemplate='%{x:,} times | %{customdata[1]:,.0f} SAR',
+                        textposition='outside',
+                        hovertemplate='%{y}<br>Returned %{x:,} times (%{customdata[0]:,} PROs)<br>Exposure: %{customdata[1]:,.2f} SAR'
+                                      '<br>Dominant reason: %{customdata[2]}<br>Dominant vendor: %{customdata[3]}<extra></extra>'
+                    )
+                    fig_recur.update_layout(
+                        yaxis_title="", xaxis_title="Times Returned", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                        font=dict(family="Inter, sans-serif"), coloraxis_showscale=False,
+                        xaxis=dict(tickformat=',', range=[0, chart_items['Occurrences'].max() * 1.4])
+                    )
+                    st.plotly_chart(fig_recur, use_container_width=True)
+
+                    st.markdown("#### Full Recurring-Item Detail")
+                    st.caption(
+                        "`Occurrences` and `Total_Exposure_SAR` here count **every reason combined** for this item. "
+                        "`Dominant_Reason` is just the *most common* reason, not the only one — so these totals can be "
+                        "slightly higher than the same item's row in the 'Repeat Offenders' table below, which counts "
+                        "one specific reason only. A small gap between the two usually means this item occasionally "
+                        "recurs for a different reason than its usual one."
+                    )
+                    st.caption(
+                        "`Avg_Days_Between`: average gap between consecutive returns of this item — a small, "
+                        "consistent number suggests a regular, systemic pattern rather than a one-off coincidence. "
+                        "`Vendor_Speed_Tier` / `Vendor_Avg_TAT_Days`: pulled from the Vendor SLA Scorecard (Tab 1) for "
+                        "this item's dominant vendor — this tells you whether a vendor with a recurring-item problem "
+                        "is at least resolving it fast (Fast/Moderate), or is *also* slow to close the credit note on "
+                        "top of the recurring issue (Slow/Critical) — a compounding problem worth escalating first."
+                    )
+                    detail_cols = [c for c in ['item_no', 'Item_Name', 'Occurrences', 'Distinct_PROs', 'Distinct_Vendors',
+                                                'Dominant_Reason', 'Dominant_Vendor_Code', 'Dominant_Vendor_Name',
+                                                'Vendor_Speed_Tier', 'Vendor_Avg_TAT_Days', 'Total_Exposure_SAR',
+                                                'First_Seen', 'Last_Seen', 'Span_Days', 'Avg_Days_Between'] if c in recurring_items.columns]
+
+                    def _highlight_vendor_speed(row):
+                        tier = row.get('Vendor_Speed_Tier', '')
+                        if 'Fast' in tier:
+                            style = 'background-color: rgba(16, 185, 129, 0.15); color: #10b981; font-weight: 600'
+                        elif 'Moderate' in tier:
+                            style = 'background-color: rgba(14, 165, 233, 0.15); color: #0ea5e9; font-weight: 600'
+                        elif 'Slow' in tier:
+                            style = 'background-color: rgba(245, 158, 11, 0.15); color: #f59e0b; font-weight: 600'
+                        elif 'Critical' in tier:
+                            style = 'background-color: rgba(239, 68, 68, 0.15); color: #ef4444; font-weight: 600'
+                        else:
+                            style = ''
+                        return [style if col == 'Vendor_Speed_Tier' else '' for col in row.index]
+
+                    st.dataframe(
+                        recurring_items[detail_cols].style.apply(_highlight_vendor_speed, axis=1),
+                        use_container_width=True, hide_index=True,
+                        column_config={
+                            "Total_Exposure_SAR": st.column_config.NumberColumn("Total Exposure (SAR)", format="%,.2f"),
+                            "First_Seen": st.column_config.DateColumn(format="YYYY-MM-DD"),
+                            "Last_Seen": st.column_config.DateColumn(format="YYYY-MM-DD"),
+                            "Avg_Days_Between": st.column_config.NumberColumn("Avg Days Between", format="%.1f"),
+                            "Vendor_Avg_TAT_Days": st.column_config.NumberColumn("Vendor Avg TAT (Days)", format="%.1f"),
+                            "Dominant_Vendor_Code": "Vendor Code",
+                            "Dominant_Vendor_Name": "Vendor Name",
+                        }
+                    )
+
+                    worst_combo = recurring_items[recurring_items['Vendor_Speed_Tier'].isin(['Slow (15-30 days)', 'Critical (> 30 days)'])]
+                    if not worst_combo.empty:
+                        st.warning(
+                            f"⚠️ **{len(worst_combo):,} recurring item(s)** are tied to vendors who are *also* Slow/Critical "
+                            f"on closure speed — a recurring problem that also takes a long time to resolve. These are the "
+                            f"top escalation priority."
+                        )
+
+                    st.markdown("---")
+                    st.markdown("#### Repeat Offenders: Vendor × Item × Reason")
+                    st.write("Same vendor, same item, same reason — repeated. This is the clearest signal of a systemic (not random) problem.")
+
+                    combo = (
+                        item_f.groupby(['buyFromVendorNo', 'buyFromVendorName', 'item_no'] + ([item_name_col] if item_name_col else []) + ['reason'])
+                        .agg(Times_Repeated=('item_no', 'count'), Total_Exposure_SAR=('Line_Exposure', 'sum'))
+                        .reset_index()
+                    )
+                    combo = combo[combo['Times_Repeated'] >= min_recur].sort_values('Times_Repeated', ascending=False)
+
+                    if combo.empty:
+                        st.info(f"No single vendor repeated the same reason for the same item {min_recur}+ times under the current filters.")
+                    else:
+                        combo_cols = [c for c in ['buyFromVendorNo', 'buyFromVendorName', 'item_no', item_name_col, 'reason',
+                                                   'Times_Repeated', 'Total_Exposure_SAR'] if c and c in combo.columns]
+                        st.dataframe(
+                            combo[combo_cols].head(50), use_container_width=True, hide_index=True,
+                            column_config={
+                                "Total_Exposure_SAR": st.column_config.NumberColumn("Total Exposure (SAR)", format="%,.2f"),
+                                "Times_Repeated": st.column_config.NumberColumn(format="%,d"),
+                            }
+                        )
+
+                    st.markdown("---")
+                    st.markdown("#### Timing Pattern — When Does a Specific Item Recur?")
+                    pick_options = (chart_items['item_no'] + " - " + chart_items[label_col].astype(str).str.slice(0, 50)).tolist()
+                    picked = st.selectbox("Pick an item to see its return timeline:", options=pick_options, key="ri_timeline_pick")
+                    picked_item_no = picked.split(" - ")[0]
+
+                    timeline_src = item_f[(item_f['item_no'] == picked_item_no) & item_f['mi.created_at'].notna()].sort_values('mi.created_at')
+                    if timeline_src.empty:
+                        st.info("No dated records available for this item.")
+                    else:
+                        fig_timeline = px.scatter(
+                            timeline_src, x='mi.created_at', y='buyFromVendorName', color='reason',
+                            size=[10] * len(timeline_src),
+                            title=f"Return Timeline for Item {picked_item_no}",
+                            hover_data={'reason': True, 'Line_Exposure': ':,.2f'}
+                        )
+                        fig_timeline.update_layout(
+                            yaxis_title="Vendor", xaxis_title="Date Returned",
+                            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                            font=dict(family="Inter, sans-serif")
+                        )
+                        st.plotly_chart(fig_timeline, use_container_width=True)
+
+                        gaps = timeline_src['mi.created_at'].diff().dt.days.dropna()
+                        if len(gaps) >= 2:
+                            st.caption(
+                                f"This item was returned {len(timeline_src)} times between "
+                                f"{timeline_src['mi.created_at'].min().date()} and {timeline_src['mi.created_at'].max().date()}, "
+                                f"averaging one return every **{gaps.mean():.1f} days** "
+                                f"(most consistent gap: {gaps.mode().iloc[0]:.0f} days; range: {gaps.min():.0f}-{gaps.max():.0f} days)."
+                            )
+
+                    st.download_button(
+                        "Download Full Recurring-Item Data (CSV)",
+                        data=convert_df_to_csv(recurring_items[detail_cols]),
+                        file_name=f"Recurring_Items_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        key="dl_recurring_items"
+                    )
 
 # ==========================================
 # PAGE 6: AUDIT TRAIL & LOGS
