@@ -1445,7 +1445,7 @@ elif page == "Executive Analytics":
     else:
         st.write("No aging data applicable for the specified parameters.")
 # ==========================================
-    # MATRIX 2A: RTV & SUPPLIER DAMAGE CREDIT NOTES
+    # MATRIX 2A: RTV CREDIT NOTES
     # ==========================================
     st.markdown("---")
     st.subheader("1. RTV & Supplier Damage Credit Notes Matrix (إشعارات دائن المرتجعات والتلفيات)")
@@ -1554,7 +1554,7 @@ elif page == "Executive Analytics":
     # MATRIX 2B: PO DISCREPANCIES CREDIT NOTES (LINKED WITH PO)
     # ==========================================
     st.markdown("---")
-    st.subheader("2. Purchase Order Discrepancies Matrix (إشعارات دائن فروقات أمر الشراء - Linked PO)")
+    st.subheader("2.Credit Note Linked PO(Receiving under adjust)")
 
     if not df_linked_exec.empty:
         po_tmp = df_linked_exec.copy()
