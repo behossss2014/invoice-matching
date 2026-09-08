@@ -1445,10 +1445,10 @@ elif page == "Executive Analytics":
     else:
         st.write("No aging data applicable for the specified parameters.")
 # ==========================================
-    # MATRIX 2A: RTV CREDIT NOTES
+    # MATRIX 2A: RTV & SUPPLIER DAMAGE CREDIT NOTES
     # ==========================================
     st.markdown("---")
-    st.subheader("1. RTV & Supplier Damage Credit Notes Matrix (إشعارات دائن المرتجعات والتلفيات)")
+    st.subheader("1. RTV Credit Notes Matrix")
 
     rtv_cn_list = []
 
