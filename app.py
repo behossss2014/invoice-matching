@@ -201,12 +201,18 @@ def convert_df_to_csv(df):
 # ==========================================
 # 2. Data Loading & Smart Processing
 # ==========================================
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=1800, show_spinner="Loading workbook (this can take a while — 'Receiving Report per items' alone has 500K+ rows)...")
 def load_all_sheets_live(file_path):
     if not os.path.exists(file_path): 
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
     
-    xls = pd.ExcelFile(file_path)
+    # 'calamine' (python-calamine) reads large .xlsx sheets dramatically faster
+    # than the default openpyxl engine — worth installing given the 500K+ row
+    # 'Receiving Report per items' sheet. Falls back cleanly if not installed.
+    try:
+        xls = pd.ExcelFile(file_path, engine='calamine')
+    except (ImportError, ValueError):
+        xls = pd.ExcelFile(file_path)
 
     # Sheet names in the source workbook can carry stray leading/trailing
     # whitespace (e.g. "Closed " instead of "Closed"), which breaks exact
@@ -235,6 +241,19 @@ def load_all_sheets_live(file_path):
     # (NEAR_EXPIRY, MISSED_ITEM, QUALITY_ISSUE, NOT_LISTED, NOT_ORDERED,
     # PRICE_ISSUE) — the Closed sheet itself has no reason column.
     df_issues = read_sheet(['pro_with_issues_linked_with_po_', 'pro_with_issues_linked_with_po'])
+    # Full item-level receiving log (what actually arrived at the warehouse,
+    # regardless of whether it was later flagged as a problem). Used to turn
+    # raw "times returned" counts into a real rejection RATE (returned ÷
+    # received), instead of an unanchored count.
+    df_receiving = read_sheet(['Receiving Report per items', 'Receiving Report per Items', 'ReceivingReportPerItems', 'Receiving Report'])
+    if not df_receiving.empty:
+        df_receiving = df_receiving.rename(columns={
+            'AL.item_no': 'item_no',
+            'AH.location_code': 'location_code',
+            'vendor_no': 'buyFromVendorNo',
+            'AH.source_no': 'po_no',
+            'completed_date': 'received_date',
+        })
 
     def standardize_columns(df):
         if df.empty: 
@@ -286,7 +305,7 @@ def load_all_sheets_live(file_path):
             return val
         return " ".join(str(val).split())
 
-    for df in [df_scheduled, df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues]:
+    for df in [df_scheduled, df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues, df_receiving]:
         if not df.empty and 'buyFromVendorNo' in df.columns:
             df['buyFromVendorNo'] = df['buyFromVendorNo'].apply(clean_vendor_code)
         if not df.empty and 'buyFromVendorName' in df.columns:
@@ -298,8 +317,19 @@ def load_all_sheets_live(file_path):
     for df in [df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues]:
         if not df.empty and 'no' in df.columns:
             df['no'] = df['no'].astype(str).str.strip().str.upper()
-    
-    return df_scheduled, df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues
+
+    if not df_issues.empty and 'item_no' in df_issues.columns:
+        df_issues['item_no'] = df_issues['item_no'].astype(str).str.strip()
+
+    if not df_receiving.empty:
+        if 'item_no' in df_receiving.columns:
+            df_receiving['item_no'] = df_receiving['item_no'].astype(str).str.strip()
+        if 'QTY' in df_receiving.columns:
+            df_receiving['QTY'] = pd.to_numeric(df_receiving['QTY'], errors='coerce').fillna(0.0)
+        if 'received_date' in df_receiving.columns:
+            df_receiving['received_date'] = pd.to_datetime(df_receiving['received_date'], errors='coerce')
+
+    return df_scheduled, df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues, df_receiving
 
 def calculate_target_amounts(df):
     if df.empty: 
@@ -310,7 +340,7 @@ def calculate_target_amounts(df):
     total_amt = pd.to_numeric(df[amt_col[0]], errors='coerce').sum() if amt_col else 0.0
     return total_amt, len(df)
 
-df_scheduled, df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues = load_all_sheets_live(EXCEL_FILE)
+df_scheduled, df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues, df_receiving = load_all_sheets_live(EXCEL_FILE)
 
 if df_scheduled is None:
     st.error(f"System Error: Target file '{EXCEL_FILE}' not found in current directory.")
@@ -320,12 +350,12 @@ if df_scheduled is None:
 # Vendor Dictionary Build
 # ==========================================
 all_codes = set()
-for df in [df_scheduled, df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues]:
+for df in [df_scheduled, df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues, df_receiving]:
     if not df.empty and 'buyFromVendorNo' in df.columns:
         all_codes.update(df['buyFromVendorNo'].dropna().unique())
 
 vendor_lookup = {}
-for df in [df_scheduled, df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues]:
+for df in [df_scheduled, df_returns, df_linked, df_pending_pros, df_closed, df_supplier_damage, df_issues, df_receiving]:
     if not df.empty and 'buyFromVendorNo' in df.columns and 'buyFromVendorName' in df.columns:
         temp_dict = df.drop_duplicates(subset=['buyFromVendorNo']).set_index('buyFromVendorNo')['buyFromVendorName'].to_dict()
         vendor_lookup.update(temp_dict)
@@ -349,6 +379,13 @@ page = st.sidebar.radio("Select Module:", [
 ])
 st.sidebar.markdown("---")
 st.sidebar.write("**System Status:** Active (Live Mode)")
+st.sidebar.caption(
+    "Data is cached for 30 minutes to avoid re-reading the ~520K-row Receiving Report on every click. "
+    "Use the button below to force a fresh read if the source file just changed."
+)
+if st.sidebar.button("🔄 Refresh Data Now", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
 
 # ==========================================
 # PAGE 1: GATE OPERATIONS
@@ -1407,6 +1444,193 @@ elif page == "Executive Analytics":
         )
     else:
         st.write("No aging data applicable for the specified parameters.")
+# ==========================================
+    # MATRIX 2A: RTV & SUPPLIER DAMAGE CREDIT NOTES
+    # ==========================================
+    st.markdown("---")
+    st.subheader("1. RTV & Supplier Damage Credit Notes Matrix (إشعارات دائن المرتجعات والتلفيات)")
+
+    rtv_cn_list = []
+
+    # Collected Returns (Withdrawn by Vendor - Pending CN)
+    if not cn_collected_df.empty:
+        c_tmp = cn_collected_df.copy()
+        c_tmp['Category'] = 'Collected Return'
+        d_col = 'postingDate' if 'postingDate' in c_tmp.columns else ('documentDate' if 'documentDate' in c_tmp.columns else None)
+        c_tmp['ref_date'] = pd.to_datetime(c_tmp[d_col], errors='coerce') if d_col else pd.NaT
+        rtv_cn_list.append(c_tmp)
+
+    # Supplier Damage (Awaiting CN Settlement)
+    if not df_damage_exec.empty:
+        d_tmp = df_damage_exec.copy()
+        d_tmp['Category'] = 'Supplier Damage'
+        d_col = 'documentDate' if 'documentDate' in d_tmp.columns else ('postingDate' if 'postingDate' in d_tmp.columns else None)
+        d_tmp['ref_date'] = pd.to_datetime(d_tmp[d_col], errors='coerce') if d_col else pd.NaT
+        
+        vat_cols_d = [c for c in d_tmp.columns if 'amount' in str(c).lower() and 'vat' in str(c).lower()]
+        if not vat_cols_d:
+            vat_cols_d = [c for c in d_tmp.columns if 'amount' in str(c).lower()]
+        t_col_d = vat_cols_d[0] if vat_cols_d else 'amount'
+        d_tmp['amountIncludingVAT'] = pd.to_numeric(d_tmp[t_col_d], errors='coerce').fillna(0.0)
+        rtv_cn_list.append(d_tmp)
+
+    if rtv_cn_list:
+        combined_rtv_cn = pd.concat(rtv_cn_list, ignore_index=True)
+        combined_rtv_cn['aging_days'] = (pd.to_datetime('today') - combined_rtv_cn['ref_date']).dt.days.fillna(0)
+        
+        grand_rtv_cn_total = combined_rtv_cn['amountIncludingVAT'].sum()
+        
+        rtv_summary = combined_rtv_cn.groupby('buyFromVendorNo').agg({
+            'buyFromVendorName': lambda x: x.iloc[0] if not x.empty else 'Unknown Vendor',
+            'amountIncludingVAT': 'sum',
+            'aging_days': 'max',
+            'no': 'count'
+        }).reset_index().rename(columns={
+            'buyFromVendorNo': 'Vendor Code',
+            'buyFromVendorName': 'Vendor Name',
+            'amountIncludingVAT': 'RTV CN Exposure',
+            'aging_days': 'Max_Age_Days',
+            'no': 'PRO / CN Count'
+        })
+        
+        rtv_summary['Vendor Name'] = rtv_summary['Vendor Code'].map(vendor_lookup).fillna(rtv_summary['Vendor Name'])
+        rtv_summary['Share %'] = (rtv_summary['RTV CN Exposure'] / grand_rtv_cn_total * 100) if grand_rtv_cn_total > 0 else 0.0
+        
+        rtv_summary['Status Alert'] = rtv_summary['Max_Age_Days'].apply(
+            lambda age: "Normal" if age <= 20 else ("Pending Vendor Action" if age <= 45 else "Escalation Required")
+        )
+
+        r_c1, r_c2 = st.columns(2)
+        with r_c1:
+            sort_rtv = st.selectbox(
+                "RTV Sort Order:", 
+                ["RTV CN Exposure (High to Low)", "Oldest Days (High to Low)", "Record Count (High to Low)", "Vendor Name (A-Z)"], 
+                key="exec_rtv_cn_sort_option"
+            )
+        with r_c2:
+            limit_rtv = st.number_input("Records Limit:", min_value=5, max_value=200, value=top_aging_n, key="exec_rtv_cn_limit_option")
+
+        if "RTV CN Exposure" in sort_rtv:
+            rtv_summary = rtv_summary.sort_values(by='RTV CN Exposure', ascending=False)
+        elif "Oldest Days" in sort_rtv:
+            rtv_summary = rtv_summary.sort_values(by='Max_Age_Days', ascending=False)
+        elif "Record Count" in sort_rtv:
+            rtv_summary = rtv_summary.sort_values(by='PRO / CN Count', ascending=False)
+        elif "Vendor Name" in sort_rtv:
+            rtv_summary = rtv_summary.sort_values(by='Vendor Name', ascending=True)
+
+        display_rtv_table = rtv_summary.head(limit_rtv)[['Vendor Code', 'Vendor Name', 'PRO / CN Count', 'RTV CN Exposure', 'Share %', 'Max_Age_Days', 'Status Alert']]
+
+        def style_cells(row):
+            age = row['Max_Age_Days']
+            if age > 45:
+                return ['background-color: rgba(239, 68, 68, 0.2); color: #ef4444; font-weight: 600'] * len(row)
+            elif age > 20:
+                return ['background-color: rgba(245, 158, 11, 0.2); color: #f59e0b; font-weight: 600'] * len(row)
+            else:
+                return ['background-color: rgba(16, 185, 129, 0.2); color: #10b981; font-weight: 600'] * len(row)
+
+        st.dataframe(
+            display_rtv_table.style.apply(style_cells, axis=1),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "RTV CN Exposure": st.column_config.NumberColumn("Total RTV Exposure (SAR)", format="%,.2f SAR"),
+                "Share %": st.column_config.NumberColumn("Liability Share", format="%.2f%%"),
+                "Max_Age_Days": st.column_config.NumberColumn("Peak Age (Days)")
+            }
+        )
+
+        st.download_button(
+            label="Download RTV Credit Notes Matrix (CSV)",
+            data=convert_df_to_csv(display_rtv_table),
+            file_name=f"Executive_RTV_Credit_Notes_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            key="dl_exec_rtv_cn_matrix"
+        )
+    else:
+        st.info("No active RTV or Supplier Damage Credit Note liabilities found for the selected period.")
+
+    # ==========================================
+    # MATRIX 2B: PO DISCREPANCIES CREDIT NOTES (LINKED WITH PO)
+    # ==========================================
+    st.markdown("---")
+    st.subheader("2. Purchase Order Discrepancies Matrix (إشعارات دائن فروقات أمر الشراء - Linked PO)")
+
+    if not df_linked_exec.empty:
+        po_tmp = df_linked_exec.copy()
+        
+        d_col_po = 'documentDate' if 'documentDate' in po_tmp.columns else ('postingDate' if 'postingDate' in po_tmp.columns else None)
+        po_tmp['ref_date'] = pd.to_datetime(po_tmp[d_col_po], errors='coerce') if d_col_po else pd.NaT
+        po_tmp['aging_days'] = (pd.to_datetime('today') - po_tmp['ref_date']).dt.days.fillna(0)
+        
+        vat_cols_p = [c for c in po_tmp.columns if 'amount' in str(c).lower() and 'vat' in str(c).lower()]
+        if not vat_cols_p:
+            vat_cols_p = [c for c in po_tmp.columns if 'amount' in str(c).lower()]
+        t_col_p = vat_cols_p[0] if vat_cols_p else 'amount'
+        po_tmp['amountIncludingVAT'] = pd.to_numeric(po_tmp[t_col_p], errors='coerce').fillna(0.0)
+        
+        grand_po_cn_total = po_tmp['amountIncludingVAT'].sum()
+        
+        po_summary = po_tmp.groupby('buyFromVendorNo').agg({
+            'buyFromVendorName': lambda x: x.iloc[0] if not x.empty else 'Unknown Vendor',
+            'amountIncludingVAT': 'sum',
+            'aging_days': 'max',
+            'no': 'count'
+        }).reset_index().rename(columns={
+            'buyFromVendorNo': 'Vendor Code',
+            'buyFromVendorName': 'Vendor Name',
+            'amountIncludingVAT': 'PO Discrepancy Exposure',
+            'aging_days': 'Max_Age_Days',
+            'no': 'Discrepancy Records'
+        })
+        
+        po_summary['Vendor Name'] = po_summary['Vendor Code'].map(vendor_lookup).fillna(po_summary['Vendor Name'])
+        po_summary['Share %'] = (po_summary['PO Discrepancy Exposure'] / grand_po_cn_total * 100) if grand_po_cn_total > 0 else 0.0
+        
+        po_summary['Action Status'] = po_summary['Max_Age_Days'].apply(
+            lambda age: "Recent Issue" if age <= 15 else ("Pending PO Deduction" if age <= 30 else "Critical Unsettled PO Discrepancy")
+        )
+
+        p_c1, p_c2 = st.columns(2)
+        with p_c1:
+            sort_po = st.selectbox(
+                "PO Discrepancy Sort Order:", 
+                ["PO Discrepancy Exposure (High to Low)", "Oldest Days (High to Low)", "Record Count (High to Low)", "Vendor Name (A-Z)"], 
+                key="exec_po_cn_sort_option"
+            )
+        with p_c2:
+            limit_po = st.number_input("Records Limit:", min_value=5, max_value=200, value=top_aging_n, key="exec_po_cn_limit_option")
+
+        if "PO Discrepancy Exposure" in sort_po:
+            po_summary = po_summary.sort_values(by='PO Discrepancy Exposure', ascending=False)
+        elif "Oldest Days" in sort_po:
+            po_summary = po_summary.sort_values(by='Max_Age_Days', ascending=False)
+        elif "Record Count" in sort_po:
+            po_summary = po_summary.sort_values(by='Discrepancy Records', ascending=False)
+        elif "Vendor Name" in sort_po:
+            po_summary = po_summary.sort_values(by='Vendor Name', ascending=True)
+
+        display_po_table = po_summary.head(limit_po)[['Vendor Code', 'Vendor Name', 'Discrepancy Records', 'PO Discrepancy Exposure', 'Share %', 'Max_Age_Days', 'Action Status']]
+
+        st.dataframe(
+            display_po_table.style.apply(style_cells, axis=1),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "PO Discrepancy Exposure": st.column_config.NumberColumn("Total PO Discrepancy (SAR)", format="%,.2f SAR"),
+                "Share %": st.column_config.NumberColumn("Liability Share", format="%.2f%%"),
+                "Max_Age_Days": st.column_config.NumberColumn("Peak Age (Days)")
+            }
+        )
+
+        st.download_button(
+            label="Download PO Discrepancy Matrix (CSV)",
+            data=convert_df_to_csv(display_po_table),
+            file_name=f"Executive_PO_Discrepancy_Credit_Notes_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            key="dl_exec_po_cn_matrix"
+        )
+    else:
+        st.info("No active Purchase Order discrepancy liabilities found for the selected period.")
 
 # ==========================================
 # PAGE 5: VENDOR SLA & ESCALATION HUB (NEW)
@@ -1700,17 +1924,18 @@ elif page == "Vendor SLA & Escalation Hub":
             f"({', '.join(KNOWN_ITEM_REASONS)}). The remaining {(1-match_rate)*100:.1f}% is **not an unknown reason** — "
             f"it splits into two explainable, non-mysterious cases: a PRO closed with **no item-level issue ever logged** "
             f"against it (e.g. a clean/full return), or a PRO from the **old 'PRO25..' numbering series** that predates "
-            f"the item-issue tracking sheet entirely. See Tab 2 for the exact breakdown."
+            f"the item-issue tracking sheet entirely. See Tab 2 (PRO Creation Deep-Dive) for the full reason breakdown."
         )
 
     st.markdown("---")
 
-    sla_tab1, sla_tab2, sla_tab3, sla_tab4, sla_tab5 = st.tabs([
+    sla_tab1, sla_tab3, sla_tab5, sla_tab6, sla_tab7, sla_tab8 = st.tabs([
         "1. Vendor SLA & Speed Scorecard", 
-        "2. Root Cause & Value Exposure", 
-        "3. PRO Creation Deep-Dive (Who & Why)",
-        "4. Smart Offsetting & Escalation",
-        "5. Recurring Item Analysis"
+        "2. PRO Creation Deep-Dive (Who & Why)",
+        "3. Recurring Item Analysis",
+        "4. Rejection Rate vs. Receiving",
+        "5. Live Vendor Pickup Responsiveness",
+        "6. Vendor 360° Reliability Scorecard"
     ])
 
     # ------------------------------------------
@@ -1812,74 +2037,7 @@ elif page == "Vendor SLA & Escalation Hub":
             st.info("No scorecard data available matching the selected filters.")
 
     # ------------------------------------------
-    # TAB 2: ROOT CAUSE & VALUE EXPOSURE
-    # ------------------------------------------
-    with sla_tab2:
-        st.subheader("Discrepancy Root Causes & Location Value Exposure")
-        st.write("Financial impact analysis linking discrepancy reasons (sourced from `pro_with_issues_linked_with_po_`) to warehouse locations.")
-
-        if closed_base.empty:
-            st.info("No closed-PRO data available to analyze root causes.")
-        else:
-            # Compute the real per-reason exposure first, so the highlight
-            # box below reflects whatever is actually in the data instead
-            # of two fixed reasons/amounts.
-            reason_summary_raw = closed_base.groupby('reason').agg(
-                Total_Exposure=('amountIncludingVAT', 'sum'),
-                Affected_Vendors=('buyFromVendorNo', 'nunique'),
-                Closed_PROs=('reason', 'count')
-            ).reset_index().sort_values('Total_Exposure', ascending=False)
-
-            grand_total = reason_summary_raw['Total_Exposure'].sum()
-            top_causes = reason_summary_raw.head(2)
-            top_causes_share = (top_causes['Total_Exposure'].sum() / grand_total * 100) if grand_total else 0.0
-
-            rc_c1, rc_c2 = st.columns([1.2, 1])
-
-            with rc_c1:
-                rc_grouped = closed_base.groupby(['reason', 'location_code'])['amountIncludingVAT'].sum().reset_index()
-                fig_rc = px.treemap(
-                    rc_grouped,
-                    path=['reason', 'location_code'],
-                    values='amountIncludingVAT',
-                    color='amountIncludingVAT',
-                    color_continuous_scale='Reds',
-                    title="Financial Exposure Breakdown by Problem Reason & Warehouse Location"
-                )
-                fig_rc.update_layout(margin=dict(l=0, r=0, t=30, b=0))
-                fig_rc.update_traces(texttemplate='%{label}<br>%{value:,.0f} SAR', hovertemplate='%{label}<br>%{value:,.2f} SAR<extra></extra>')
-                st.plotly_chart(fig_rc, use_container_width=True)
-
-            with rc_c2:
-                st.markdown("#### Primary Exposure Key Highlights")
-                highlight_rows = "".join(
-                    f'<p style="margin:2px 0;"><b>{row.reason} Impact:</b> {row.Total_Exposure:,.2f} SAR</p>'
-                    for row in top_causes.itertuples()
-                )
-                st.markdown(f"""
-                <div class="alert-box" style="border-left: 4px solid #ef4444;">
-                    {highlight_rows}
-                    <p style="margin:6px 0; font-size:12px; color:#64748b;">
-                    These top {len(top_causes)} root cause(s) constitute <b>{top_causes_share:.1f}% of total financial discrepancies</b> across warehouse operations.
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
-
-                reason_summary = reason_summary_raw.rename(columns={
-                    'reason': 'Discrepancy Cause',
-                    'Total_Exposure': 'Total Exposure (SAR)',
-                    'Affected_Vendors': 'Affected Vendors',
-                    'Closed_PROs': 'Closed PROs'
-                })
-
-                st.dataframe(
-                    reason_summary,
-                    use_container_width=True, hide_index=True,
-                    column_config={"Total Exposure (SAR)": st.column_config.NumberColumn(format="%,.2f SAR")}
-                )
-
-    # ------------------------------------------
-    # TAB 3: PRO CREATION DEEP-DIVE (WHO & WHY)
+    # TAB 2: PRO CREATION DEEP-DIVE (WHO & WHY)
     # ------------------------------------------
     # This tab answers the operational questions directly:
     #   - Which vendor is CAUSING us the most PROs (by count)?
@@ -2108,6 +2266,46 @@ elif page == "Vendor SLA & Escalation Hub":
                         )
                         st.plotly_chart(fig_loc, use_container_width=True)
 
+                st.markdown("#### Warehouse Rejection Profile — % of Each Warehouse's Issues, by Reason")
+                st.write(
+                    "Each row sums to 100% — this shows the *mix* of reasons at each warehouse, not raw volume. "
+                    "A warehouse with an unusually high share of one reason (compared to the others) often points "
+                    "to a local process issue at that specific site, not a vendor-wide problem."
+                )
+                if 'location_code' in issues_f.columns and not issues_f.empty:
+                    wh_reason_counts = pd.crosstab(issues_f['location_code'], issues_f['reason'])
+                    wh_reason_pct = wh_reason_counts.div(wh_reason_counts.sum(axis=1), axis=0) * 100
+                    wh_reason_pct = wh_reason_pct.round(1).reset_index().rename(columns={'location_code': 'Warehouse'})
+
+                    pct_cols = [c for c in wh_reason_pct.columns if c != 'Warehouse']
+                    st.dataframe(
+                        wh_reason_pct, use_container_width=True, hide_index=True,
+                        column_config={c: st.column_config.NumberColumn(c, format="%.1f%%") for c in pct_cols}
+                    )
+
+                    # Flag the single biggest outlier automatically: the
+                    # warehouse+reason cell furthest above that reason's
+                    # average share across all other warehouses.
+                    overall_share = wh_reason_counts.sum(axis=0) / wh_reason_counts.sum(axis=0).sum() * 100
+                    diffs = wh_reason_pct.set_index('Warehouse')[pct_cols].subtract(overall_share, axis=1)
+                    if not diffs.empty and diffs.to_numpy().size:
+                        worst_wh, worst_reason = diffs.stack().idxmax()
+                        worst_val = wh_reason_pct.set_index('Warehouse').loc[worst_wh, worst_reason]
+                        baseline_val = overall_share[worst_reason]
+                        st.info(
+                            f"📍 **Biggest local anomaly**: at **{worst_wh}**, **{worst_reason}** makes up "
+                            f"**{worst_val:.1f}%** of all issues there, vs **{baseline_val:.1f}%** on average across "
+                            f"other warehouses — worth a site-specific review rather than a vendor-wide one."
+                        )
+
+                    st.download_button(
+                        "Download Warehouse Rejection Profile (CSV)",
+                        data=convert_df_to_csv(wh_reason_pct),
+                        file_name=f"Warehouse_Rejection_Profile_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        key="dl_warehouse_profile"
+                    )
+
                 if 'mi.created_at' in issues_f.columns and issues_f['mi.created_at'].notna().any():
                     st.markdown("#### Is this trending up or down over time?")
                     trend_src = issues_f.dropna(subset=['mi.created_at']).copy()
@@ -2198,117 +2396,7 @@ elif page == "Vendor SLA & Escalation Hub":
                 )
 
     # ------------------------------------------
-    # TAB 4: SMART OFFSETTING & ESCALATION
-    # ------------------------------------------
-    with sla_tab4:
-        st.subheader("Smart Offsetting & Automated PO Escalation")
-        st.write("Deduct unresolved pending return balances exceeding the 30-day threshold directly from new PO shipments.")
-
-        pending_source = df_returns[df_returns['Status'] == 'Pending for Collection'].copy() if not df_returns.empty else pd.DataFrame()
-
-        if not pending_source.empty:
-            if 'documentDate' in pending_source.columns:
-                pending_source['documentDate'] = pd.to_datetime(pending_source['documentDate'], errors='coerce')
-                pending_source['age_days'] = (pd.to_datetime('today') - pending_source['documentDate']).dt.days
-            else:
-                pending_source['age_days'] = pd.NA
-
-            overdue_pros = pending_source[pending_source['age_days'] > 30].copy()
-
-            # 'Pending Returns' has no discrepancy-reason column of its own —
-            # enrich it from 'pro_with_issues_linked_with_po_' (the same
-            # source the Vendor SLA scorecard joins against), keyed by PRO
-            # number, instead of leaving/faking a 'reason' field.
-            if not overdue_pros.empty:
-                if not df_issues.empty and 'no' in df_issues.columns and 'reason' in df_issues.columns:
-                    reason_per_pro = (
-                        df_issues.groupby('no')['reason']
-                        .agg(lambda s: s.value_counts().idxmax() if s.notna().any() else pd.NA)
-                        .rename('reason')
-                    )
-                    overdue_pros = overdue_pros.merge(reason_per_pro, on='no', how='left')
-                if 'reason' not in overdue_pros.columns:
-                    overdue_pros['reason'] = pd.NA
-                overdue_pros['reason'] = overdue_pros['reason'].fillna('UNSPECIFIED')
-
-                if 'location_code' not in overdue_pros.columns:
-                    overdue_pros['location_code'] = 'UNKNOWN'
-                else:
-                    overdue_pros['location_code'] = overdue_pros['location_code'].fillna('UNKNOWN')
-
-                if 'amountIncludingVAT' not in overdue_pros.columns:
-                    amt_cols = [c for c in overdue_pros.columns if 'amount' in str(c).lower()]
-                    overdue_pros['amountIncludingVAT'] = pd.to_numeric(overdue_pros[amt_cols[0]], errors='coerce').fillna(0.0) if amt_cols else 0.0
-        else:
-            overdue_pros = pd.DataFrame(columns=['no', 'buyFromVendorNo', 'buyFromVendorName', 'location_code',
-                                                  'reason', 'amountIncludingVAT', 'age_days'])
-
-        if overdue_pros.empty:
-            st.success("No pending-return PROs currently exceed the 30-day resolution threshold.")
-        else:
-            st.warning(f"Critical Alert: Identified {len(overdue_pros)} PRO records exceeding the 30-day resolution threshold.")
-
-            st.markdown("Select critical PRO items to generate direct deduction debit notes for Accounts & Procurement:")
-
-            overdue_pros['Select_For_Deduction'] = True
-
-            display_cols = ['Select_For_Deduction', 'no', 'buyFromVendorNo', 'buyFromVendorName',
-                             'location_code', 'reason', 'amountIncludingVAT', 'age_days']
-            display_cols = [c for c in display_cols if c in overdue_pros.columns]
-
-            edited_df = st.data_editor(
-                overdue_pros[display_cols],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Select_For_Deduction": st.column_config.CheckboxColumn("Deduct from PO?", default=True),
-                    "no": "PRO Number",
-                    "buyFromVendorNo": "Vendor Code",
-                    "buyFromVendorName": "Vendor Name",
-                    "location_code": "Warehouse",
-                    "reason": "Discrepancy Cause",
-                    "amountIncludingVAT": st.column_config.NumberColumn("Offset Amount (SAR)", format="%,.2f SAR"),
-                    "age_days": st.column_config.NumberColumn("Aging (Days)")
-                },
-                key="deduction_editor"
-            )
-
-            selected_deductions = edited_df[edited_df['Select_For_Deduction'] == True].copy()
-
-            if not selected_deductions.empty:
-                total_offset_val = selected_deductions['amountIncludingVAT'].sum()
-
-                e_col1, e_col2 = st.columns([2, 1])
-                with e_col1:
-                    st.success(f"Total Offsetting Value Selected for Direct Deduction: **{total_offset_val:,.2f} SAR** across **{len(selected_deductions)} PROs**.")
-
-                with e_col2:
-                    export_cols = ['no', 'buyFromVendorNo', 'buyFromVendorName', 'location_code', 'reason', 'amountIncludingVAT', 'age_days']
-                    export_cols = [c for c in export_cols if c in selected_deductions.columns]
-                    offset_export_df = selected_deductions[export_cols].copy()
-                    offset_export_df['Action_Type'] = "Direct PO Deduction"
-                    offset_export_df['Escalation_Status'] = "Critical Overdue > 30 Days"
-                    offset_export_df['Processed_By'] = st.session_state.logged_in_user
-                    offset_export_df['Timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                    csv_offset = convert_df_to_csv(offset_export_df)
-                    st.download_button(
-                        label="Export Direct PO Deduction Template (CSV)",
-                        data=csv_offset,
-                        file_name=f"PO_Direct_Deduction_Template_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv"
-                    )
-
-                if st.button("Register Offsetting Execution in Audit Trail", key="btn_register_offset"):
-                    record_audit(
-                        "Smart Offsetting Escalation",
-                        f"Direct PO deduction executed for {len(selected_deductions)} PROs totaling {total_offset_val:,.2f} SAR",
-                        st.session_state.logged_in_user
-                    )
-                    st.success("Offsetting action logged into system audit trail.")
-
-    # ------------------------------------------
-    # TAB 5: RECURRING ITEM ANALYSIS
+    # TAB 3: RECURRING ITEM ANALYSIS
     # ------------------------------------------
     # Answers: does a specific ITEM keep coming back as a return? For which
     # reason(s)? Does the same VENDOR repeat the same problem with that item,
@@ -2571,6 +2659,546 @@ elif page == "Vendor SLA & Escalation Hub":
                         mime="text/csv",
                         key="dl_recurring_items"
                     )
+
+    # ------------------------------------------
+    # TAB 4: REJECTION RATE vs. RECEIVING
+    # ------------------------------------------
+    # Business rule (per Ops): a vendor's delivery is only ACCEPTED into the
+    # warehouse (and therefore appears in 'Receiving Report per items') if
+    # the item's remaining shelf life is >= 70%. If it's below that, the
+    # delivery is rejected right at the gate and NEVER enters inventory —
+    # but it IS logged as a discrepancy record (e.g. NEAR_EXPIRY) in
+    # 'pro_with_issues_linked_with_po_'.
+    #
+    # This means "Receiving Report" only captures ACCEPTED attempts, not
+    # every time the vendor showed up. So the correct rejection rate is:
+    #
+    #   Rejection Rate = Rejected Attempts / (Rejected Attempts + Accepted Attempts)
+    #
+    # NOT flagged-quantity / received-quantity — that under-counts total
+    # attempts, since rejected ones are invisible to the receiving report by
+    # design. This version is always between 0% and 100%.
+    # ------------------------------------------
+    with sla_tab6:
+        st.subheader("Rejection Rate — Accepted vs. Rejected at the Gate")
+        st.write(
+            "Every time a vendor brings an item, it's either **accepted** (appears in `Receiving Report per items`) "
+            "or **rejected at the gate** — e.g. shelf life below the 70% threshold — which never enters inventory "
+            "but is logged as a discrepancy in `pro_with_issues_linked_with_po_`. This tab computes the real "
+            "rejection rate: rejected attempts ÷ (rejected + accepted) attempts."
+        )
+
+        if df_receiving.empty:
+            st.info("The 'Receiving Report per items' sheet is not available, so a rejection rate cannot be computed.")
+        elif df_issues.empty or 'item_no' not in df_issues.columns:
+            st.info("The 'pro_with_issues_linked_with_po_' sheet is not available, so a rejection rate cannot be computed.")
+        else:
+            issue_src = df_issues.copy()
+            issue_src['missing_quantity'] = pd.to_numeric(issue_src.get('missing_quantity', 0), errors='coerce').fillna(0.0)
+            issue_src['cost_inc_vat'] = pd.to_numeric(issue_src.get('cost_inc_vat', 0), errors='coerce').fillna(0.0)
+            issue_src['Line_Exposure'] = issue_src['cost_inc_vat'] * issue_src['missing_quantity']
+
+            # Cached separately: this groupby scans all 500K+ receiving rows,
+            # and Streamlit reruns this whole block on every widget interaction
+            # (typing in the search box, changing Top N, etc.) — caching keeps
+            # those interactions instant instead of re-scanning every time.
+            @st.cache_data(show_spinner=False)
+            def _aggregate_receiving(recv_df):
+                return recv_df.groupby(['item_no', 'buyFromVendorNo']).agg(
+                    Times_Accepted=('item_no', 'count'),
+                    Qty_Accepted=('QTY', 'sum')
+                ).reset_index()
+
+            recv_agg = _aggregate_receiving(df_receiving)
+
+            # ---- All 6 reasons are treated identically ----
+            # Confirmed by Ops: 'Receiving Report per items' contains ONLY
+            # items that the receiving team physically accepted and posted
+            # into the system. ALL 6 reasons (including PRICE_ISSUE) are
+            # "Receiving under adjustment" — never actually received, never
+            # entered Receiving Report, and get a PRO the same way a rejected
+            # item does. So there's no special-casing needed: every reason's
+            # quantity is simply ADDED on top of Receiving Report to get the
+            # true total invoiced quantity, and the rate is Rejected ÷ Total.
+            all_reason_opts = sorted(issue_src['reason'].dropna().unique().tolist())
+            st.markdown("##### All 6 reasons are included — none of them were ever physically received:")
+            st.caption(
+                "`Receiving Report per items` only contains items the warehouse team actually accepted and posted "
+                "into the system. All 6 discrepancy reasons (NEAR_EXPIRY, MISSED_ITEM, QUALITY_ISSUE, NOT_LISTED, "
+                "NOT_ORDERED, and PRICE_ISSUE) are 'Receiving under adjustment' — never received, never in this "
+                "report, and handled as a rejected item with a PRO either way."
+            )
+            gate_reasons = st.multiselect(
+                "Reasons included in this rate (deselect to exclude one):",
+                options=all_reason_opts, default=all_reason_opts, key="rr_gate_reasons"
+            )
+
+            if not gate_reasons:
+                st.warning("Select at least one reason above to compute a rejection rate.")
+                st.stop()
+
+            issue_src_gate = issue_src[issue_src['reason'].isin(gate_reasons)]
+            issue_agg = issue_src_gate.groupby(['item_no', 'buyFromVendorNo']).agg(
+                Times_Rejected=('item_no', 'count'), Qty_Rejected=('missing_quantity', 'sum'),
+                Total_Exposure_SAR=('Line_Exposure', 'sum'),
+                Dominant_Reason=('reason', lambda s: s.value_counts().idxmax() if s.notna().any() else pd.NA)
+            ).reset_index()
+
+            # Outer merge: keep item+vendor combos that only have accepted
+            # deliveries too (0% rejection rate) so the overall baseline is
+            # accurate, not just skewed toward problem items.
+            rate_df = recv_agg.merge(issue_agg, on=['item_no', 'buyFromVendorNo'], how='outer')
+            rate_df['buyFromVendorName'] = rate_df['buyFromVendorNo'].map(vendor_lookup)
+
+            for c in ['Times_Accepted', 'Qty_Accepted', 'Times_Rejected', 'Qty_Rejected', 'Total_Exposure_SAR']:
+                rate_df[c] = rate_df[c].fillna(0.0)
+
+            # Total invoiced quantity = accepted (Receiving Report) + rejected
+            # (never received, any of the 6 reasons above).
+            rate_df['Total_Attempts'] = rate_df['Times_Accepted'] + rate_df['Times_Rejected']
+            rate_df['Total_Qty_Attempted'] = rate_df['Qty_Accepted'] + rate_df['Qty_Rejected']
+
+            rate_df = rate_df[rate_df['Total_Attempts'] > 0].copy()
+
+            rate_df['Rejection_Rate_%'] = rate_df['Times_Rejected'] / rate_df['Total_Attempts'] * 100
+            rate_df['Rejection_Rate_Qty_%'] = (
+                rate_df['Qty_Rejected'] / rate_df['Total_Qty_Attempted'].replace(0, pd.NA) * 100
+            ).fillna(0.0)
+
+            total_combos = len(rate_df)
+            never_accepted = int((rate_df['Times_Accepted'] == 0).sum())
+            always_accepted = int((rate_df['Times_Rejected'] == 0).sum())
+            baseline_rate = rate_df['Qty_Rejected'].sum() / rate_df['Total_Qty_Attempted'].sum() * 100 if rate_df['Total_Qty_Attempted'].sum() else 0.0
+
+            kk1, kk2, kk3, kk4 = st.columns(4)
+            kk1.metric("Item+Vendor Combos Analyzed", f"{total_combos:,}")
+            kk2.metric("Baseline Rejection Rate", f"{baseline_rate:.2f}%", f"Based on all {len(gate_reasons)} selected reasons, by quantity")
+            kk3.metric("Always Needs Credit Note (100%)", f"{never_accepted:,}", delta_color="inverse")
+            kk4.metric("Never Needed One (0%)", f"{always_accepted:,}", delta_color="off")
+
+            st.info(
+                f"📊 **Baseline: {baseline_rate:.2f}%** of all invoiced quantity (across every item+vendor combo, "
+                f"across all {len(gate_reasons)} selected reasons) ended up needing a credit note. Use this as the "
+                f"'normal' benchmark — combos well above this are the real outliers, not just the ones with the "
+                f"highest raw count."
+            )
+
+            if not gate_reasons == all_reason_opts:
+                with st.expander("Reasons currently excluded from this rate"):
+                    excluded_reasons = [r for r in all_reason_opts if r not in gate_reasons]
+                    excl_summary = (
+                        issue_src[issue_src['reason'].isin(excluded_reasons)]
+                        .groupby('reason').agg(Line_Items=('reason', 'count'), Total_Exposure_SAR=('Line_Exposure', 'sum'))
+                        .reset_index().sort_values('Total_Exposure_SAR', ascending=False)
+                    )
+                    st.dataframe(excl_summary, use_container_width=True, hide_index=True,
+                                 column_config={"Total_Exposure_SAR": st.column_config.NumberColumn("Total Exposure (SAR)", format="%,.2f")})
+
+            st.markdown("---")
+
+            rf1, rf2 = st.columns(2)
+            with rf1:
+                min_attempts = st.number_input("Minimum total attempts (filters out noise):", min_value=1, value=3, step=1, key="rr_min_attempts")
+            with rf2:
+                rr_vendor_search = st.text_input("Search Vendor Name/Code:", key="rr_vendor_search").strip().lower()
+
+            view_df = rate_df[rate_df['Total_Attempts'] >= min_attempts].copy()
+            if rr_vendor_search:
+                code_m = view_df['buyFromVendorNo'].str.lower().str.contains(rr_vendor_search, na=False)
+                name_m = view_df['buyFromVendorName'].astype(str).str.lower().str.contains(rr_vendor_search, na=False)
+                view_df = view_df[code_m | name_m]
+
+            if view_df.empty:
+                st.warning("No item+vendor combos match the current filters.")
+            else:
+                ch1, ch2 = st.columns([3, 1])
+                with ch1:
+                    st.markdown("#### Highest Rejection Rates (accepted vs. rejected attempts)")
+                with ch2:
+                    top_n_rr = st.number_input("Top N", min_value=3, max_value=50, value=10, step=1, key="topn_rejection_rate", label_visibility="collapsed")
+
+                item_names_map = (
+                    df_issues.dropna(subset=['item_no']).drop_duplicates('item_no').set_index('item_no')['mi.name'].to_dict()
+                    if 'mi.name' in df_issues.columns else {}
+                )
+                view_df['Item_Name'] = view_df['item_no'].map(item_names_map).fillna('')
+                chart_rr = view_df.sort_values(['Rejection_Rate_%', 'Total_Attempts'], ascending=[False, False]).head(top_n_rr).copy()
+                chart_rr['Label'] = chart_rr['item_no'] + " (" + chart_rr['buyFromVendorName'].astype(str) + ")"
+
+                fig_rr = px.bar(
+                    chart_rr.sort_values('Rejection_Rate_%'), x='Rejection_Rate_%', y='Label', orientation='h',
+                    color='Rejection_Rate_%', color_continuous_scale='Reds',
+                    title=f"Top {top_n_rr} Highest Rejection Rates (min {min_attempts} attempts)",
+                    custom_data=['Times_Rejected', 'Times_Accepted', 'Total_Attempts', 'Total_Exposure_SAR']
+                )
+                fig_rr.update_traces(
+                    texttemplate='%{x:,.1f}%', textposition='outside',
+                    hovertemplate='%{y}<br>Rejected %{customdata[0]:,.0f} of %{customdata[2]:,.0f} attempts '
+                                  '(%{customdata[1]:,.0f} accepted)<br>Rate: %{x:,.1f}%'
+                                  '<br>Exposure: %{customdata[3]:,.2f} SAR<extra></extra>'
+                )
+                fig_rr.update_layout(
+                    yaxis_title="", xaxis_title="Rejection Rate (%)", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(family="Inter, sans-serif"), coloraxis_showscale=False,
+                    xaxis=dict(ticksuffix='%', range=[0, 105])
+                )
+                st.plotly_chart(fig_rr, use_container_width=True)
+
+                st.markdown("#### Full Rejection-Rate Detail")
+                st.caption(
+                    "`Rejection_Rate_%`: rejected attempts ÷ total attempts (accepted + rejected) — the primary, "
+                    "event-based rate. `Rejection_Rate_Qty_%`: the same idea by quantity instead of event count, "
+                    "shown for context (a rejected event with a huge quantity matters more than a small one)."
+                )
+                detail_rr_cols = ['item_no', 'Item_Name', 'buyFromVendorNo', 'buyFromVendorName', 'Dominant_Reason',
+                                   'Times_Accepted', 'Times_Rejected', 'Total_Attempts', 'Rejection_Rate_%',
+                                   'Qty_Accepted', 'Qty_Rejected', 'Rejection_Rate_Qty_%', 'Total_Exposure_SAR']
+                detail_rr_cols = [c for c in detail_rr_cols if c in view_df.columns]
+                st.dataframe(
+                    view_df[detail_rr_cols].sort_values('Rejection_Rate_%', ascending=False),
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        "buyFromVendorNo": "Vendor Code", "buyFromVendorName": "Vendor Name",
+                        "Times_Accepted": st.column_config.NumberColumn("Times Accepted", format="%,.0f"),
+                        "Times_Rejected": st.column_config.NumberColumn("Times Rejected", format="%,.0f"),
+                        "Total_Attempts": st.column_config.NumberColumn("Total Attempts", format="%,.0f"),
+                        "Rejection_Rate_%": st.column_config.NumberColumn("Rejection Rate", format="%.1f%%"),
+                        "Qty_Accepted": st.column_config.NumberColumn("Qty Accepted", format="%,.0f"),
+                        "Qty_Rejected": st.column_config.NumberColumn("Qty Rejected", format="%,.0f"),
+                        "Rejection_Rate_Qty_%": st.column_config.NumberColumn("Rejection Rate (Qty)", format="%.1f%%"),
+                        "Total_Exposure_SAR": st.column_config.NumberColumn("Exposure (SAR)", format="%,.2f"),
+                    }
+                )
+
+                st.download_button(
+                    "Download Rejection Rate Data (CSV)",
+                    data=convert_df_to_csv(view_df[detail_rr_cols]),
+                    file_name=f"Rejection_Rates_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    key="dl_rejection_rates"
+                )
+
+    # ------------------------------------------
+    # TAB 5: LIVE VENDOR PICKUP RESPONSIVENESS
+    # ------------------------------------------
+    # This is a SEPARATE process from the PRO discrepancy workflow tracked in
+    # Tabs 1-4 (confirmed by Ops: different document population, RTV vs
+    # Purchase Order returns, zero overlap in reference numbers). It answers
+    # one specific question: once we've told a vendor "come pick this up",
+    # how long are they actually taking to show up?
+    #
+    # IMPORTANT LIMITATION (per Ops): once a return is Collected or gets its
+    # credit note Posted, the date fields get OVERWRITTEN with the closing
+    # date — the original "waiting since" date is lost. So a real historical
+    # TAT cannot be computed from this sheet. This view is intentionally
+    # LIVE-ONLY: it only looks at PROs still sitting in "Pending for
+    # Collection" today, where 'aging_days' is still the genuine, unmodified
+    # number of days that stock has been waiting for vendor pickup.
+    # ------------------------------------------
+    with sla_tab7:
+        st.subheader("Live Vendor Pickup Responsiveness")
+        st.write(
+            "How long is stock actually sitting and waiting for **vendor pickup**, right now? This tracks the "
+            "RTV (Return To Vendor) process from `Pending Returns` — a separate workflow from the PRO discrepancy "
+            "process in the other tabs. Only 'Pending for Collection' records are used, because once a return is "
+            "collected or credited, its original wait-start date is overwritten and can't be recovered — so this "
+            "is a live snapshot, not a historical average."
+        )
+
+        if df_returns.empty or 'Status' not in df_returns.columns:
+            st.info("The 'Pending Returns' sheet is not available, so pickup responsiveness cannot be computed.")
+        else:
+            live_pending = df_returns[df_returns['Status'] == 'Pending for Collection'].copy()
+
+            if live_pending.empty:
+                st.success("No returns are currently waiting for vendor pickup.")
+            else:
+                live_pending['aging_days'] = pd.to_numeric(live_pending.get('aging_days', 0), errors='coerce').fillna(0)
+                amt_col = 'amountIncludingVAT' if 'amountIncludingVAT' in live_pending.columns else None
+                if amt_col:
+                    live_pending[amt_col] = pd.to_numeric(live_pending[amt_col], errors='coerce').fillna(0.0)
+
+                def assign_pickup_tier(days):
+                    if days <= 14:
+                        return "Fast (<= 14 days)"
+                    elif days <= 30:
+                        return "Moderate (15-30 days)"
+                    elif days <= 60:
+                        return "Slow (31-60 days)"
+                    else:
+                        return "Critical (> 60 days)"
+
+                live_pending['Pickup_Tier'] = live_pending['aging_days'].apply(assign_pickup_tier)
+
+                total_pending = len(live_pending)
+                total_value = live_pending[amt_col].sum() if amt_col else 0.0
+                avg_wait = live_pending['aging_days'].mean()
+                critical_count = int((live_pending['aging_days'] > 60).sum())
+                oldest_wait = int(live_pending['aging_days'].max())
+
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric("Currently Awaiting Pickup", f"{total_pending:,}")
+                p2.metric("Value Waiting for Pickup", f"{total_value:,.2f} SAR" if amt_col else "N/A")
+                p3.metric("Average Wait So Far", f"{avg_wait:.1f} Days")
+                p4.metric("Critical (> 60 Days)", f"{critical_count:,}", delta_color="inverse")
+
+                st.caption(f"Oldest item still waiting for pickup: **{oldest_wait} days**.")
+                st.markdown("---")
+
+                st.markdown("#### Vendor Pickup Scorecard")
+                st.write("Ranked by average wait time — this is a *live* ranking of who's slow to collect their returns right now, not a historical average.")
+
+                vf1, vf2 = st.columns(2)
+                with vf1:
+                    min_items = st.number_input("Minimum items waiting (filters out one-off noise):", min_value=1, value=2, step=1, key="pickup_min_items")
+                with vf2:
+                    pickup_vendor_search = st.text_input("Search Vendor Name/Code:", key="pickup_vendor_search").strip().lower()
+
+                vendor_agg = live_pending.groupby(['buyFromVendorNo', 'buyFromVendorName']).agg(
+                    Items_Waiting=('buyFromVendorNo', 'count'),
+                    Avg_Wait_Days=('aging_days', 'mean'),
+                    Oldest_Wait_Days=('aging_days', 'max'),
+                    Value_Waiting_SAR=(amt_col, 'sum') if amt_col else ('buyFromVendorNo', 'count')
+                ).reset_index()
+                vendor_agg = vendor_agg[vendor_agg['Items_Waiting'] >= min_items]
+                vendor_agg['Pickup_Tier'] = vendor_agg['Avg_Wait_Days'].apply(assign_pickup_tier)
+
+                if pickup_vendor_search:
+                    code_m = vendor_agg['buyFromVendorNo'].str.lower().str.contains(pickup_vendor_search, na=False)
+                    name_m = vendor_agg['buyFromVendorName'].astype(str).str.lower().str.contains(pickup_vendor_search, na=False)
+                    vendor_agg = vendor_agg[code_m | name_m]
+
+                vendor_agg = vendor_agg.sort_values('Avg_Wait_Days', ascending=False)
+
+                if vendor_agg.empty:
+                    st.info("No vendors match the current filters.")
+                else:
+                    def _highlight_pickup_tier(row):
+                        tier = row.get('Pickup_Tier', '')
+                        if 'Fast' in tier:
+                            style = 'background-color: rgba(16, 185, 129, 0.15); color: #10b981; font-weight: 600'
+                        elif 'Moderate' in tier:
+                            style = 'background-color: rgba(14, 165, 233, 0.15); color: #0ea5e9; font-weight: 600'
+                        elif 'Slow' in tier:
+                            style = 'background-color: rgba(245, 158, 11, 0.15); color: #f59e0b; font-weight: 600'
+                        else:
+                            style = 'background-color: rgba(239, 68, 68, 0.15); color: #ef4444; font-weight: 600'
+                        return [style if col == 'Pickup_Tier' else '' for col in row.index]
+
+                    st.dataframe(
+                        vendor_agg.style.apply(_highlight_pickup_tier, axis=1),
+                        use_container_width=True, hide_index=True,
+                        column_config={
+                            "buyFromVendorNo": "Vendor Code", "buyFromVendorName": "Vendor Name",
+                            "Items_Waiting": st.column_config.NumberColumn(format="%,d"),
+                            "Avg_Wait_Days": st.column_config.NumberColumn("Avg Wait (Days)", format="%.1f"),
+                            "Oldest_Wait_Days": st.column_config.NumberColumn("Oldest Wait (Days)", format="%.0f"),
+                            "Value_Waiting_SAR": st.column_config.NumberColumn("Value Waiting (SAR)", format="%,.2f"),
+                        }
+                    )
+
+                    critical_vendors = vendor_agg[vendor_agg['Pickup_Tier'] == 'Critical (> 60 days)']
+                    if not critical_vendors.empty:
+                        st.warning(
+                            f"⚠️ **{len(critical_vendors):,} vendor(s)** are averaging over 60 days to collect their "
+                            f"returns — worth an immediate pickup-escalation call, separate from any PRO/quality escalation."
+                        )
+
+                    st.download_button(
+                        "Download Vendor Pickup Scorecard (CSV)",
+                        data=convert_df_to_csv(vendor_agg),
+                        file_name=f"Vendor_Pickup_Scorecard_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        key="dl_pickup_scorecard"
+                    )
+
+    # ------------------------------------------
+    # TAB 6: VENDOR 360° RELIABILITY SCORECARD
+    # ------------------------------------------
+    # The PRO-discrepancy workflow (Tabs 1-4) and the RTV pickup workflow
+    # (Tab 5) are two separate document populations with no shared reference
+    # number — but they DO share one common key: the vendor code. This tab
+    # combines every dimension we track, per vendor, into one view, so a
+    # vendor that's fine on 3 metrics but critical on the 4th doesn't stay
+    # hidden inside a single-purpose tab.
+    # ------------------------------------------
+    with sla_tab8:
+        st.subheader("Vendor 360° Reliability Scorecard")
+        st.write(
+            "Every vendor-performance dimension tracked across this Hub, combined into one table: how many "
+            "discrepancy PROs they cause, how fast they resolve them, their rejection rate at receiving, and how "
+            "fast they pick up RTV returns. A vendor can look fine on three metrics and be critical on the fourth — "
+            "this table is built so that doesn't stay hidden in a single-purpose tab."
+        )
+
+        # ---- A) PRO creation + resolution speed (from Tabs 1-2 data sources) ----
+        pro_caused = pd.DataFrame(columns=['buyFromVendorNo', 'PROs_Caused'])
+        if not df_issues.empty and 'no' in df_issues.columns and 'buyFromVendorNo' in df_issues.columns:
+            pro_caused = df_issues.groupby('buyFromVendorNo')['no'].nunique().reset_index(name='PROs_Caused')
+
+        resolution = pd.DataFrame(columns=['buyFromVendorNo', 'Closed_PROs', 'Avg_Resolution_TAT_Days'])
+        if not closed_base.empty:
+            resolution = closed_base.groupby('buyFromVendorNo').agg(
+                Closed_PROs=('buyFromVendorNo', 'count'),
+                Avg_Resolution_TAT_Days=('tat_days', 'mean')
+            ).reset_index()
+
+        def _resolution_tier(days):
+            if pd.isna(days):
+                return "No Closed History"
+            elif days <= 7:
+                return "Fast"
+            elif days <= 14:
+                return "Moderate"
+            elif days <= 30:
+                return "Slow"
+            else:
+                return "Critical"
+
+        # ---- B) Rejection rate at receiving (from Tab 4's model) ----
+        rejection = pd.DataFrame(columns=['buyFromVendorNo', 'Rejection_Rate_%'])
+        if not df_receiving.empty and not df_issues.empty and 'item_no' in df_issues.columns:
+            recv_by_vendor = df_receiving.groupby('buyFromVendorNo').agg(
+                Times_Accepted=('buyFromVendorNo', 'count')
+            ).reset_index()
+            issue_by_vendor = df_issues.groupby('buyFromVendorNo').agg(
+                Times_Rejected=('buyFromVendorNo', 'count')
+            ).reset_index()
+            rejection = recv_by_vendor.merge(issue_by_vendor, on='buyFromVendorNo', how='outer')
+            rejection[['Times_Accepted', 'Times_Rejected']] = rejection[['Times_Accepted', 'Times_Rejected']].fillna(0.0)
+            rejection['Total_Attempts'] = rejection['Times_Accepted'] + rejection['Times_Rejected']
+            rejection = rejection[rejection['Total_Attempts'] > 0].copy()
+            rejection['Rejection_Rate_%'] = rejection['Times_Rejected'] / rejection['Total_Attempts'] * 100
+            rejection = rejection[['buyFromVendorNo', 'Rejection_Rate_%']]
+
+        def _rejection_tier(rate):
+            if pd.isna(rate):
+                return "No Receiving History"
+            elif rate <= 2:
+                return "Low"
+            elif rate <= 5:
+                return "Moderate"
+            elif rate <= 10:
+                return "High"
+            else:
+                return "Critical"
+
+        # ---- C) Live RTV pickup responsiveness (from Tab 5's model) ----
+        pickup = pd.DataFrame(columns=['buyFromVendorNo', 'RTV_Items_Waiting', 'RTV_Avg_Wait_Days'])
+        if not df_returns.empty and 'Status' in df_returns.columns:
+            live_pending_360 = df_returns[df_returns['Status'] == 'Pending for Collection'].copy()
+            if not live_pending_360.empty:
+                live_pending_360['aging_days'] = pd.to_numeric(live_pending_360.get('aging_days', 0), errors='coerce').fillna(0)
+                pickup = live_pending_360.groupby('buyFromVendorNo').agg(
+                    RTV_Items_Waiting=('buyFromVendorNo', 'count'),
+                    RTV_Avg_Wait_Days=('aging_days', 'mean')
+                ).reset_index()
+
+        def _pickup_tier(days):
+            if pd.isna(days):
+                return "Nothing Waiting"
+            elif days <= 14:
+                return "Fast"
+            elif days <= 30:
+                return "Moderate"
+            elif days <= 60:
+                return "Slow"
+            else:
+                return "Critical"
+
+        # ---- Combine all four into one vendor-level table ----
+        scorecard = pro_caused.merge(resolution, on='buyFromVendorNo', how='outer') \
+                               .merge(rejection, on='buyFromVendorNo', how='outer') \
+                               .merge(pickup, on='buyFromVendorNo', how='outer')
+
+        if scorecard.empty:
+            st.info("No vendor data available across any of the tracked dimensions.")
+        else:
+            scorecard['buyFromVendorName'] = scorecard['buyFromVendorNo'].map(vendor_lookup)
+            scorecard['PROs_Caused'] = scorecard['PROs_Caused'].fillna(0).astype(int)
+            scorecard['Closed_PROs'] = scorecard['Closed_PROs'].fillna(0).astype(int)
+            scorecard['RTV_Items_Waiting'] = scorecard['RTV_Items_Waiting'].fillna(0).astype(int)
+
+            scorecard['Resolution_Tier'] = scorecard['Avg_Resolution_TAT_Days'].apply(_resolution_tier)
+            scorecard['Rejection_Tier'] = scorecard['Rejection_Rate_%'].apply(_rejection_tier)
+            scorecard['Pickup_Tier'] = scorecard['RTV_Avg_Wait_Days'].apply(_pickup_tier)
+
+            # Red Flags: how many of the 3 speed/quality dimensions are
+            # Slow/Critical/High for this vendor — the higher this number,
+            # the more this is a vendor-wide reliability problem rather than
+            # a one-off issue in a single process.
+            def _count_red_flags(row):
+                flags = 0
+                if row['Resolution_Tier'] in ('Slow', 'Critical'):
+                    flags += 1
+                if row['Rejection_Tier'] in ('High', 'Critical'):
+                    flags += 1
+                if row['Pickup_Tier'] in ('Slow', 'Critical'):
+                    flags += 1
+                return flags
+
+            scorecard['Red_Flags'] = scorecard.apply(_count_red_flags, axis=1)
+
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                min_pros_360 = st.number_input("Minimum PROs caused (filters out one-off vendors):", min_value=0, value=3, step=1, key="v360_min_pros")
+            with f2:
+                min_flags_360 = st.number_input("Minimum Red Flags:", min_value=0, max_value=3, value=0, step=1, key="v360_min_flags")
+            with f3:
+                v360_search = st.text_input("Search Vendor Name/Code:", key="v360_search").strip().lower()
+
+            view_360 = scorecard[(scorecard['PROs_Caused'] >= min_pros_360) & (scorecard['Red_Flags'] >= min_flags_360)].copy()
+            if v360_search:
+                code_m = view_360['buyFromVendorNo'].str.lower().str.contains(v360_search, na=False)
+                name_m = view_360['buyFromVendorName'].astype(str).str.lower().str.contains(v360_search, na=False)
+                view_360 = view_360[code_m | name_m]
+
+            view_360 = view_360.sort_values(['Red_Flags', 'PROs_Caused'], ascending=[False, False])
+
+            multi_flag_count = int((scorecard['Red_Flags'] >= 2).sum())
+            st.info(
+                f"📌 **{multi_flag_count:,} vendor(s)** are flagged as Slow/Critical/High on **2 or more** of the "
+                f"three tracked dimensions at once — these are vendor-wide reliability problems, not an isolated "
+                f"issue in one process, and are the top escalation priority overall."
+            )
+
+            if view_360.empty:
+                st.warning("No vendors match the current filters.")
+            else:
+                def _highlight_flags(row):
+                    flags = row.get('Red_Flags', 0)
+                    if flags >= 2:
+                        style = 'background-color: rgba(239, 68, 68, 0.15); color: #ef4444; font-weight: 700'
+                    elif flags == 1:
+                        style = 'background-color: rgba(245, 158, 11, 0.15); color: #f59e0b; font-weight: 600'
+                    else:
+                        style = 'background-color: rgba(16, 185, 129, 0.10); color: #10b981; font-weight: 600'
+                    return [style if col == 'Red_Flags' else '' for col in row.index]
+
+                display_cols = ['buyFromVendorNo', 'buyFromVendorName', 'PROs_Caused', 'Closed_PROs',
+                                 'Avg_Resolution_TAT_Days', 'Resolution_Tier', 'Rejection_Rate_%', 'Rejection_Tier',
+                                 'RTV_Items_Waiting', 'RTV_Avg_Wait_Days', 'Pickup_Tier', 'Red_Flags']
+                display_cols = [c for c in display_cols if c in view_360.columns]
+
+                st.dataframe(
+                    view_360[display_cols].style.apply(_highlight_flags, axis=1),
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        "buyFromVendorNo": "Vendor Code", "buyFromVendorName": "Vendor Name",
+                        "Avg_Resolution_TAT_Days": st.column_config.NumberColumn("Resolution TAT (Days)", format="%.1f"),
+                        "Rejection_Rate_%": st.column_config.NumberColumn("Rejection Rate", format="%.2f%%"),
+                        "RTV_Avg_Wait_Days": st.column_config.NumberColumn("RTV Wait (Days)", format="%.1f"),
+                        "Red_Flags": st.column_config.NumberColumn("Red Flags", format="%d / 3"),
+                    }
+                )
+
+                st.download_button(
+                    "Download Vendor 360° Scorecard (CSV)",
+                    data=convert_df_to_csv(view_360[display_cols]),
+                    file_name=f"Vendor_360_Scorecard_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    key="dl_v360_scorecard"
+                )
 
 # ==========================================
 # PAGE 6: AUDIT TRAIL & LOGS
