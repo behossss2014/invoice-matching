@@ -1187,8 +1187,8 @@ elif page == "Executive Analytics":
 
         st.write(f"Analytics Scope: Data spanning **{start_date}** to **{end_date}**.")
 
-    # Chart 1: Outstanding CN & Supplier Damage Liability
-    st.subheader(f"Top {top_cn_n} Vendors: Outstanding CN & Supplier Damage Liability")
+    # Chart 1: Outstanding CN Related To RTV
+    st.subheader(f"Top {top_cn_n} Vendors: Outstanding CN Related To RTV")
     cn_collected_df = df_exec_filtered[df_exec_filtered['Status'] == 'Collected'].copy()
     
     cn_combined_all = pd.concat([d for d in [cn_collected_df, df_damage_exec] if not d.empty], ignore_index=True) if any(not d.empty for d in [cn_collected_df, df_damage_exec]) else pd.DataFrame()
