@@ -1137,7 +1137,7 @@ elif page == "Executive Analytics":
     )
     
     st.sidebar.markdown("---")
-    top_cn_n = st.sidebar.number_input("Top Variables Filter (CN Related to RTV):", min_value=1, max_value=100, value=10)
+    top_cn_n = st.sidebar.number_input("Top Variables Filter (CN Related To RTV):", min_value=1, max_value=100, value=10)
     top_ret_n = st.sidebar.number_input("Top Variables Filter (Returns):", min_value=1, max_value=100, value=10)
     top_aging_n = st.sidebar.number_input("Aging Summary Display Limit:", min_value=1, max_value=200, value=50)
 
@@ -1187,8 +1187,8 @@ elif page == "Executive Analytics":
 
         st.write(f"Analytics Scope: Data spanning **{start_date}** to **{end_date}**.")
 
-    # Chart 1: Outstanding CN related to RTV
-    st.subheader(f"Top {top_cn_n} Vendors: Outstanding CN related to RTV")
+    # Chart 1: Outstanding CN & Supplier Damage Liability
+    st.subheader(f"Top {top_cn_n} Vendors: Outstanding CN & Supplier Damage Liability")
     cn_collected_df = df_exec_filtered[df_exec_filtered['Status'] == 'Collected'].copy()
     
     cn_combined_all = pd.concat([d for d in [cn_collected_df, df_damage_exec] if not d.empty], ignore_index=True) if any(not d.empty for d in [cn_collected_df, df_damage_exec]) else pd.DataFrame()
@@ -1261,7 +1261,90 @@ elif page == "Executive Analytics":
     else: 
         st.write("Insufficient data to generate chart.")
 
-    # Chart 2: Stagnant Pending Returns
+    # Chart 2: Outstanding CN related to PROs (Linked_With_PO)
+    st.subheader(f"Top {top_cn_n} Vendors: Outstanding CN related to PROs")
+    st.caption(
+        "Credit notes/deductions linked to the PRO (Purchase Order discrepancy) process — sourced from "
+        "`Linked_With_PO`, i.e. claims already matched to a new PO for deduction but not yet fully closed. "
+        "This is the PRO-side equivalent of the RTV chart above."
+    )
+
+    if not df_linked_exec.empty:
+        vat_cols_lnk = [c for c in df_linked_exec.columns if 'amount' in str(c).lower() and 'vat' in str(c).lower()]
+        if not vat_cols_lnk:
+            vat_cols_lnk = [c for c in df_linked_exec.columns if 'amount' in str(c).lower()]
+        t_col_lnk = vat_cols_lnk[0] if vat_cols_lnk else 'amount'
+        df_linked_exec['amountIncludingVAT'] = pd.to_numeric(df_linked_exec[t_col_lnk], errors='coerce').fillna(0.0) if t_col_lnk in df_linked_exec.columns else 0.0
+
+    if not df_linked_exec.empty and 'buyFromVendorNo' in df_linked_exec.columns:
+        pro_cn_data = df_linked_exec.groupby('buyFromVendorNo')['amountIncludingVAT'].sum().nlargest(top_cn_n).reset_index()
+    else:
+        pro_cn_data = pd.DataFrame()
+
+    if not pro_cn_data.empty:
+        pro_cn_data['Vendor_Label'] = pro_cn_data['buyFromVendorNo'].apply(get_vendor_label)
+        fig1b = px.bar(
+            pro_cn_data,
+            x='amountIncludingVAT',
+            y='Vendor_Label',
+            orientation='h',
+            color='amountIncludingVAT',
+            color_continuous_scale=[[0, "#334155"], [1, "#a78bfa"]]
+        )
+        fig1b.update_layout(
+            yaxis_title="",
+            xaxis_title="Total Exposure (SAR)",
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(family="Inter, sans-serif"),
+            margin=dict(l=0, r=20, t=10, b=10)
+        )
+        fig1b.update_traces(hovertemplate='Vendor: %{y}<br>Amount: %{x:,.2f} SAR<extra></extra>')
+        st.plotly_chart(fig1b, use_container_width=True)
+
+        pro_cn_shown_val = pro_cn_data['amountIncludingVAT'].sum()
+        pro_cn_total_system_val = df_linked_exec['amountIncludingVAT'].sum() if not df_linked_exec.empty else 0.0
+        pro_cn_share_pct = (pro_cn_shown_val / pro_cn_total_system_val * 100) if pro_cn_total_system_val > 0 else 0.0
+
+        st.markdown("<p style='font-size: 13px; font-weight: 700; margin-bottom: 6px;'> Performance Context </p>", unsafe_allow_html=True)
+        pb1, pb2, pb3, pb4 = st.columns([1.2, 1.2, 1, 0.8])
+
+        with pb1:
+            st.markdown(f"""
+            <div class="exec-banner-card">
+                <div class="exec-banner-label">Selected Category Total (Top Vendors)</div>
+                <div class="exec-banner-val">{pro_cn_shown_val:,.2f} SAR</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with pb2:
+            st.markdown(f"""
+            <div class="exec-banner-card">
+                <div class="exec-banner-label">System Total</div>
+                <div class="exec-banner-val">{pro_cn_total_system_val:,.2f} SAR</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with pb3:
+            st.markdown(f"""
+            <div class="exec-banner-card">
+                <div class="exec-banner-label">Actual Representation Ratio</div>
+                <div class="exec-banner-val">{pro_cn_share_pct:.2f}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with pb4:
+            st.write("")
+            if st.button("Focus Mode", key="focus_pro_cn_mode", help="Direct focus on this group's data"):
+                st.session_state['focus_pro_cn_list'] = pro_cn_data['buyFromVendorNo'].tolist()
+                st.success(f"Focus Mode applied to top {len(pro_cn_data)} vendors.")
+
+        st.progress(min(max(pro_cn_share_pct / 100.0, 0.0), 1.0))
+        st.markdown("---")
+    else:
+        st.write("Insufficient data to generate chart.")
+
+    # Chart 3: Stagnant Pending Returns
     st.subheader(f"Top {top_ret_n} Vendors: Stagnant Pending Returns")
     ret_pending_df = df_exec_filtered[df_exec_filtered['Status'] == 'Pending for Collection']
     ret_data = ret_pending_df.groupby('buyFromVendorNo')['amountIncludingVAT'].sum().nlargest(top_ret_n).reset_index()
