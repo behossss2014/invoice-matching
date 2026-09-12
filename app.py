@@ -1137,7 +1137,7 @@ elif page == "Executive Analytics":
     )
     
     st.sidebar.markdown("---")
-    top_cn_n = st.sidebar.number_input("Top Variables Filter (CN & Damage):", min_value=1, max_value=100, value=10)
+    top_cn_n = st.sidebar.number_input("Top Variables Filter (CN Related to RTV):", min_value=1, max_value=100, value=10)
     top_ret_n = st.sidebar.number_input("Top Variables Filter (Returns):", min_value=1, max_value=100, value=10)
     top_aging_n = st.sidebar.number_input("Aging Summary Display Limit:", min_value=1, max_value=200, value=50)
 
