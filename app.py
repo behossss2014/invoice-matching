@@ -1137,7 +1137,7 @@ elif page == "Executive Analytics":
     )
     
     st.sidebar.markdown("---")
-    top_cn_n = st.sidebar.number_input("Top Variables Filter (CN Related To RTV):", min_value=1, max_value=100, value=10)
+    top_cn_n = st.sidebar.number_input("Top Variables Filter (CN & Damage):", min_value=1, max_value=100, value=10)
     top_ret_n = st.sidebar.number_input("Top Variables Filter (Returns):", min_value=1, max_value=100, value=10)
     top_aging_n = st.sidebar.number_input("Aging Summary Display Limit:", min_value=1, max_value=200, value=50)
 
@@ -1187,14 +1187,20 @@ elif page == "Executive Analytics":
 
         st.write(f"Analytics Scope: Data spanning **{start_date}** to **{end_date}**.")
 
-    # Chart 1: Outstanding CN Related To RTV
-    st.subheader(f"Top {top_cn_n} Vendors: Outstanding CN Related To RTV")
+    # Chart 1: Outstanding CN & Supplier Damage Liability
+    st.subheader(f"Top {top_cn_n} Vendors: Outstanding CN & Supplier Damage Liability")
     cn_collected_df = df_exec_filtered[df_exec_filtered['Status'] == 'Collected'].copy()
     
     cn_combined_all = pd.concat([d for d in [cn_collected_df, df_damage_exec] if not d.empty], ignore_index=True) if any(not d.empty for d in [cn_collected_df, df_damage_exec]) else pd.DataFrame()
 
     if not cn_combined_all.empty and 'buyFromVendorNo' in cn_combined_all.columns:
-        cn_data = cn_combined_all.groupby('buyFromVendorNo')['amountIncludingVAT'].sum().nlargest(top_cn_n).reset_index()
+        has_no_cn = 'no' in cn_combined_all.columns
+        cn_data = cn_combined_all.groupby('buyFromVendorNo').agg(
+            amountIncludingVAT=('amountIncludingVAT', 'sum'),
+            PRO_Count=('no', 'nunique') if has_no_cn else ('buyFromVendorNo', 'count')
+        ).nlargest(top_cn_n, 'amountIncludingVAT').reset_index()
+        total_pro_count_cn = cn_combined_all['no'].nunique() if has_no_cn else len(cn_combined_all)
+        cn_data['PRO_Share_%'] = (cn_data['PRO_Count'] / total_pro_count_cn * 100) if total_pro_count_cn else 0.0
     else:
         cn_data = pd.DataFrame()
     
@@ -1206,7 +1212,8 @@ elif page == "Executive Analytics":
             y='Vendor_Label', 
             orientation='h', 
             color='amountIncludingVAT', 
-            color_continuous_scale=[[0, "#334155"], [1, "#00c9b1"]]
+            color_continuous_scale=[[0, "#334155"], [1, "#00c9b1"]],
+            custom_data=['PRO_Count', 'PRO_Share_%']
         )
         fig1.update_layout(
             yaxis_title="", 
@@ -1216,7 +1223,11 @@ elif page == "Executive Analytics":
             font=dict(family="Inter, sans-serif"),
             margin=dict(l=0, r=20, t=10, b=10)
         )
-        fig1.update_traces(hovertemplate='Vendor: %{y}<br>Amount: %{x:,.2f} SAR<extra></extra>')
+        fig1.update_traces(
+            texttemplate='%{customdata[0]:,} PROs (%{customdata[1]:.1f}%)',
+            textposition='outside',
+            hovertemplate='Vendor: %{y}<br>Amount: %{x:,.2f} SAR<br>PROs: %{customdata[0]:,} (%{customdata[1]:.1f}% of total)<extra></extra>'
+        )
         st.plotly_chart(fig1, use_container_width=True)
 
         cn_shown_val = cn_data['amountIncludingVAT'].sum()
@@ -1277,7 +1288,13 @@ elif page == "Executive Analytics":
         df_linked_exec['amountIncludingVAT'] = pd.to_numeric(df_linked_exec[t_col_lnk], errors='coerce').fillna(0.0) if t_col_lnk in df_linked_exec.columns else 0.0
 
     if not df_linked_exec.empty and 'buyFromVendorNo' in df_linked_exec.columns:
-        pro_cn_data = df_linked_exec.groupby('buyFromVendorNo')['amountIncludingVAT'].sum().nlargest(top_cn_n).reset_index()
+        has_no_lnk = 'no' in df_linked_exec.columns
+        pro_cn_data = df_linked_exec.groupby('buyFromVendorNo').agg(
+            amountIncludingVAT=('amountIncludingVAT', 'sum'),
+            PRO_Count=('no', 'nunique') if has_no_lnk else ('buyFromVendorNo', 'count')
+        ).nlargest(top_cn_n, 'amountIncludingVAT').reset_index()
+        total_pro_count_lnk = df_linked_exec['no'].nunique() if has_no_lnk else len(df_linked_exec)
+        pro_cn_data['PRO_Share_%'] = (pro_cn_data['PRO_Count'] / total_pro_count_lnk * 100) if total_pro_count_lnk else 0.0
     else:
         pro_cn_data = pd.DataFrame()
 
@@ -1289,7 +1306,8 @@ elif page == "Executive Analytics":
             y='Vendor_Label',
             orientation='h',
             color='amountIncludingVAT',
-            color_continuous_scale=[[0, "#334155"], [1, "#a78bfa"]]
+            color_continuous_scale=[[0, "#334155"], [1, "#a78bfa"]],
+            custom_data=['PRO_Count', 'PRO_Share_%']
         )
         fig1b.update_layout(
             yaxis_title="",
@@ -1299,7 +1317,11 @@ elif page == "Executive Analytics":
             font=dict(family="Inter, sans-serif"),
             margin=dict(l=0, r=20, t=10, b=10)
         )
-        fig1b.update_traces(hovertemplate='Vendor: %{y}<br>Amount: %{x:,.2f} SAR<extra></extra>')
+        fig1b.update_traces(
+            texttemplate='%{customdata[0]:,} PROs (%{customdata[1]:.1f}%)',
+            textposition='outside',
+            hovertemplate='Vendor: %{y}<br>Amount: %{x:,.2f} SAR<br>PROs: %{customdata[0]:,} (%{customdata[1]:.1f}% of total)<extra></extra>'
+        )
         st.plotly_chart(fig1b, use_container_width=True)
 
         pro_cn_shown_val = pro_cn_data['amountIncludingVAT'].sum()
@@ -1347,7 +1369,16 @@ elif page == "Executive Analytics":
     # Chart 3: Stagnant Pending Returns
     st.subheader(f"Top {top_ret_n} Vendors: Stagnant Pending Returns")
     ret_pending_df = df_exec_filtered[df_exec_filtered['Status'] == 'Pending for Collection']
-    ret_data = ret_pending_df.groupby('buyFromVendorNo')['amountIncludingVAT'].sum().nlargest(top_ret_n).reset_index()
+    if not ret_pending_df.empty and 'buyFromVendorNo' in ret_pending_df.columns:
+        has_no_ret = 'no' in ret_pending_df.columns
+        ret_data = ret_pending_df.groupby('buyFromVendorNo').agg(
+            amountIncludingVAT=('amountIncludingVAT', 'sum'),
+            PRO_Count=('no', 'nunique') if has_no_ret else ('buyFromVendorNo', 'count')
+        ).nlargest(top_ret_n, 'amountIncludingVAT').reset_index()
+        total_pro_count_ret = ret_pending_df['no'].nunique() if has_no_ret else len(ret_pending_df)
+        ret_data['PRO_Share_%'] = (ret_data['PRO_Count'] / total_pro_count_ret * 100) if total_pro_count_ret else 0.0
+    else:
+        ret_data = pd.DataFrame()
     
     if not ret_data.empty:
         ret_data['Vendor_Label'] = ret_data['buyFromVendorNo'].apply(get_vendor_label)
@@ -1357,7 +1388,8 @@ elif page == "Executive Analytics":
             y='Vendor_Label', 
             orientation='h', 
             color='amountIncludingVAT', 
-            color_continuous_scale=[[0, "#1e293b"], [1, "#0ea5e9"]]
+            color_continuous_scale=[[0, "#1e293b"], [1, "#0ea5e9"]],
+            custom_data=['PRO_Count', 'PRO_Share_%']
         )
         fig2.update_layout(
             yaxis_title="", 
@@ -1367,7 +1399,11 @@ elif page == "Executive Analytics":
             font=dict(family="Inter, sans-serif"),
             margin=dict(l=0, r=20, t=10, b=10)
         )
-        fig2.update_traces(hovertemplate='Vendor: %{y}<br>Amount: %{x:,.2f} SAR<extra></extra>')
+        fig2.update_traces(
+            texttemplate='%{customdata[0]:,} PROs (%{customdata[1]:.1f}%)',
+            textposition='outside',
+            hovertemplate='Vendor: %{y}<br>Amount: %{x:,.2f} SAR<br>PROs: %{customdata[0]:,} (%{customdata[1]:.1f}% of total)<extra></extra>'
+        )
         st.plotly_chart(fig2, use_container_width=True)
 
         ret_shown_val = ret_data['amountIncludingVAT'].sum()
