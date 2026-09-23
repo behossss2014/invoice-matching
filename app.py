@@ -17,6 +17,29 @@ st.set_page_config(
 
 st.markdown("""
     <style>
+    /* ==========================================
+       DESIGN SYSTEM — "Terminal / Dock Control"
+       A warehouse-operations identity: deep graphite panels like steel
+       cabinets, a signal-amber accent borrowed from dock lighting and
+       high-vis gear, and bold tabular numerals that read like a terminal
+       readout board. Status color (teal/amber/coral) is reserved strictly
+       for meaning — good / attention / critical — never decoration.
+       ========================================== */
+    @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+
+    :root {
+        --wh-graphite-900: #11141A;
+        --wh-graphite-800: #1A1F28;
+        --wh-panel: #1D232D;
+        --wh-steel-700: #2B3240;
+        --wh-amber: #F2A93B;
+        --wh-amber-dim: rgba(242, 169, 59, 0.14);
+        --wh-teal: #26C6A0;
+        --wh-coral: #F0553F;
+        --wh-ink-50: #F3F5F7;
+        --wh-slate-400: #8E97A6;
+    }
+
     /* Global Container & Direction Setup */
     [data-testid="stHeader"] { visibility: hidden; }
     
@@ -34,112 +57,162 @@ st.markdown("""
     }
 
     h1, h2, h3, h4 { 
+        font-family: 'Archivo', 'Inter', sans-serif;
         font-weight: 700;
-        letter-spacing: -0.02em;
+        letter-spacing: -0.01em;
         margin-bottom: 0.5rem;
     }
 
-    /* Modern Executive Navbar Theme */
+    /* Dock Control navbar: a steel bar with a single amber signal rule,
+       the way a loading-dock light strip marks an active bay. */
     .ninja-navbar {
         position: fixed;
         top: 0;
         left: 0;
         width: 100%;
-        height: 52px;
-        background-color: #1e293b;
+        height: 54px;
+        background-color: var(--wh-graphite-900);
         z-index: 999999;
         display: flex;
         align-items: center;
         justify-content: space-between;
         padding: 0 24px;
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
-        border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+        border-bottom: 3px solid var(--wh-amber);
     }
+    .ninja-brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    /* Wordmark glyph: three stacked bars of decreasing width, like a
+       pallet load viewed from the side — drawn in pure CSS, not a stock icon. */
+    .ninja-mark {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        width: 20px;
+    }
+    .ninja-mark span {
+        display: block;
+        height: 4px;
+        border-radius: 1px;
+        background: var(--wh-amber);
+    }
+    .ninja-mark span:nth-child(1) { width: 20px; }
+    .ninja-mark span:nth-child(2) { width: 14px; }
+    .ninja-mark span:nth-child(3) { width: 8px; }
     .ninja-logo {
-        color: #00c9b1;
-        font-size: 24px;
+        color: var(--wh-ink-50);
+        font-family: 'Archivo', sans-serif;
+        font-size: 18px;
         font-weight: 800;
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        letter-spacing: -0.5px;
+        letter-spacing: -0.01em;
     }
+    .ninja-logo b { color: var(--wh-amber); font-weight: 800; }
     .ninja-title {
-        color: #f8fafc;
-        font-size: 14px;
+        color: var(--wh-slate-400);
+        font-size: 11.5px;
         font-weight: 600;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.1em;
         text-transform: uppercase;
+        border-left: 1px solid var(--wh-steel-700);
+        padding-left: 14px;
+        margin-left: 2px;
     }
 
     /* Adaptive Sidebar Refinement */
     [data-testid="stSidebar"] {
         border-right: 1px solid rgba(128, 128, 128, 0.2);
     }
+    [data-testid="stSidebar"] .stRadio label {
+        font-size: 14px;
+    }
 
-    /* Card & Alert Adaptive Styles */
+    /* Card & Alert — a manifest-tag treatment: flat panel, sharp-ish
+       corners, a colored spine on the left instead of an ambient drop
+       shadow. The spine color is load-bearing information (status), so
+       it defaults to steel and is overridden per-context where used. */
     .alert-box {
         background-color: #f8fafc; 
-        border-radius: 8px; 
+        border-radius: 6px; 
         padding: 16px 20px;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05); 
-        border: 1px solid #e2e8f0; 
+        border: 1px solid #e2e8f0;
+        border-left: 3px solid var(--wh-steel-700);
         margin-bottom: 20px; 
         font-weight: 500; 
         font-size: 14px;
         color: #0f172a;
     }
     .card-title {
-        font-size: 14px;
+        font-family: 'Archivo', sans-serif;
+        font-size: 13px;
         font-weight: 700;
         margin-bottom: 10px;
-        color: #00c9b1;
+        color: var(--wh-teal);
         border-bottom: 1px solid #e2e8f0;
         padding-bottom: 6px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
+        letter-spacing: 0.02em;
     }
 
-    /* Compact Executive Metric Banners */
+    /* Compact Executive Metric Banners — terminal-readout styling: a
+       steel-spined tag with tabular-numeral figures. */
     .exec-banner-card {
         background-color: #f8fafc;
         border: 1px solid #e2e8f0;
-        border-radius: 8px;
+        border-left: 3px solid var(--wh-amber);
+        border-radius: 6px;
         padding: 10px 14px;
         margin-bottom: 6px;
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
     }
     .exec-banner-label {
-        font-size: 11px;
+        font-size: 10.5px;
         color: #64748b;
         font-weight: 600;
         margin-bottom: 4px;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.06em;
     }
     .exec-banner-val {
-        font-size: 16px;
+        font-family: 'Archivo', sans-serif;
+        font-size: 17px;
         font-weight: 700;
+        font-variant-numeric: tabular-nums;
         color: #0f172a;
+    }
+
+    /* Streamlit's own st.metric widget: give the value the same
+       terminal-readout treatment so native KPIs match the custom ones. */
+    [data-testid="stMetricValue"] {
+        font-family: 'Archivo', sans-serif;
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 12px;
+        letter-spacing: 0.03em;
     }
 
     /* Automatic Dark Mode Support */
     @media (prefers-color-scheme: dark) {
         .alert-box {
-            background-color: #1e293b !important;
-            border-color: #334155 !important;
-            color: #f8fafc !important;
+            background-color: var(--wh-panel) !important;
+            border-color: var(--wh-steel-700) !important;
+            color: var(--wh-ink-50) !important;
         }
         .exec-banner-card {
-            background-color: #1e293b !important;
-            border-color: #334155 !important;
+            background-color: var(--wh-panel) !important;
+            border-color: var(--wh-steel-700) !important;
+            border-left-color: var(--wh-amber) !important;
         }
         .exec-banner-label {
-            color: #94a3b8 !important;
+            color: var(--wh-slate-400) !important;
         }
         .exec-banner-val {
-            color: #f8fafc !important;
+            color: var(--wh-ink-50) !important;
         }
         .card-title {
-            border-bottom-color: #334155 !important;
+            border-bottom-color: var(--wh-steel-700) !important;
         }
     }
 
@@ -150,12 +223,57 @@ st.markdown("""
     [data-testid="stDataFrame"] div[role="gridcell"] {
         padding: 8px 12px !important;
         font-size: 13px !important;
+        font-variant-numeric: tabular-nums;
+    }
+
+    /* Tabs: a thin amber underline on the active tab instead of the
+       default Streamlit red, to keep the signal color consistent. */
+    .stTabs [aria-selected="true"] {
+        border-bottom-color: var(--wh-amber) !important;
+        color: var(--wh-amber) !important;
+    }
+
+    /* --- 1. Micro-interaction: a soft lift on hover, pure CSS, no JS --- */
+    .exec-banner-card, .alert-box {
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .exec-banner-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px -6px rgba(0, 0, 0, 0.25);
+    }
+
+    /* --- 2. Whisper-quiet warehouse-floor grid behind the whole app --- */
+    [data-testid="stAppViewContainer"] {
+        background-image:
+            linear-gradient(rgba(128, 128, 128, 0.05) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(128, 128, 128, 0.05) 1px, transparent 1px);
+        background-size: 34px 34px;
+    }
+
+    /* --- 3. Soft status-colored glow, reserved for genuinely critical
+       native alerts (st.error) so it still reads as "pay attention now"
+       rather than decorating every box on the page. --- */
+    [data-testid="stAlert"]:has(*[data-testid="stAlertContentError"]) {
+        box-shadow: 0 0 0 1px rgba(240, 85, 63, 0.35), 0 0 18px -4px rgba(240, 85, 63, 0.45);
+    }
+    [data-testid="stAlert"]:has(*[data-testid="stAlertContentWarning"]) {
+        box-shadow: 0 0 0 1px rgba(242, 169, 59, 0.3), 0 0 14px -5px rgba(242, 169, 59, 0.35);
+    }
+
+    /* --- 4. Gradient fill for st.progress(), amber -> teal, instead of a
+       flat single-color bar. Falls back silently (no functional risk) if
+       a future Streamlit version renames this internal class. --- */
+    [data-testid="stProgress"] > div > div > div {
+        background-image: linear-gradient(90deg, var(--wh-amber), var(--wh-teal)) !important;
     }
     </style>
     
     <div class="ninja-navbar">
-        <div class="ninja-logo">ninja</div>
-        <div class="ninja-title">Warehouse Intelligence Hub</div>
+        <div class="ninja-brand">
+            <div class="ninja-mark"><span></span><span></span><span></span></div>
+            <div class="ninja-logo">Warehouse<b> Intelligence</b></div>
+        </div>
+        <div class="ninja-title">Returns · Discrepancies · Vendor Performance</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -401,7 +519,7 @@ if page == "Gate Operations":
         border_color = "#00C9B1" if has_appointment else "#f59e0b"
         
         st.markdown(f"""
-        <div class="alert-box" style="border-left: 4px solid {border_color};">
+        <div class="alert-box" style="border-left: 4px solid {border_color}; box-shadow: 0 0 14px -5px {border_color}66;">
             <div class="card-title">Vendor & Shipment Information</div>
             <p style="margin:4px 0;"><b>Name:</b> {v_name}</p>
             <p style="margin:4px 0;"><b>Code:</b> {v_no}</p>
@@ -1212,7 +1330,7 @@ elif page == "Executive Analytics":
             y='Vendor_Label', 
             orientation='h', 
             color='amountIncludingVAT', 
-            color_continuous_scale=[[0, "#334155"], [1, "#00c9b1"]],
+            color_continuous_scale=[[0, "#334155"], [1, "#26C6A0"]],
             custom_data=['PRO_Count', 'PRO_Share_%']
         )
         fig1.update_layout(
