@@ -997,7 +997,7 @@ elif page == "Data Analytics & Insights":
 
     st.markdown("### Detailed Record Analysis")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Pending Returns", "Collected CNs", "Linked PO CNs", "Supplier Damage (Awaiting CN)", "Orphaned PROs"])
+    tab1, tab2, tab3 = st.tabs(["Pending Returns", "Waiting CNs", "Orphaned PROs"])
     
     with tab1:
         if not returns_df.empty:
@@ -1047,145 +1047,139 @@ elif page == "Data Analytics & Insights":
             st.write("No pending returns identified for the selected criteria.")
             
     with tab2:
+        st.write("All records still awaiting a credit note, from the three source processes, combined into one view. Use the **CN Category** column to filter by source.")
+
+        merged_frames = []
+
+        # ---- Source 1: Collected (RTV physically picked up, CN not yet posted) ----
         if not collected_df.empty:
             df_t2 = collected_df.copy()
             df_t2['VendorName'] = df_t2['buyFromVendorNo'].map(vendor_mapping).fillna("Unknown Vendor")
-            
+            df_t2['CN_Category'] = 'Collected'
+
             if 'postingDate' in df_t2.columns:
-                df_t2['postingDate'] = pd.to_datetime(df_t2['postingDate'], errors='coerce')
-                df_t2['aging_days'] = (pd.to_datetime('today') - df_t2['postingDate']).dt.days
+                df_t2['Document_Date'] = pd.to_datetime(df_t2['postingDate'], errors='coerce')
             else:
-                df_t2['postingDate'] = pd.NaT
-                df_t2['aging_days'] = 0
+                df_t2['Document_Date'] = pd.NaT
+            df_t2['Aging_Days'] = (pd.to_datetime('today') - df_t2['Document_Date']).dt.days
 
-            rec_cols = [c for c in df_t2.columns if 'lastreceiving' in str(c).lower().replace(' ', '').replace('_', '')]
-            if rec_cols: 
-                df_t2['days_since_last_receiving'] = df_t2[rec_cols[0]]
-            elif 'days_since_last_receiving' not in df_t2.columns: 
-                df_t2['days_since_last_receiving'] = None
-
-            if 'amount' not in df_t2.columns: 
+            if 'amount' not in df_t2.columns:
                 df_t2['amount'] = 0.0
             if 'amountIncludingVAT' not in df_t2.columns:
                 vat_cols = [c for c in df_t2.columns if 'vat' in str(c).lower()]
                 df_t2['amountIncludingVAT'] = df_t2[vat_cols[0]] if vat_cols else 0.0
+            df_t2['AmountWithVAT'] = df_t2['amountIncludingVAT']
 
-            if 'Status' not in df_t2.columns: 
-                df_t2['Status'] = 'Collected'
+            loc_col_t2 = 'locationCode' if 'locationCode' in df_t2.columns else ('location_code' if 'location_code' in df_t2.columns else None)
+            df_t2['Location_Code'] = df_t2[loc_col_t2] if loc_col_t2 else "N/A"
 
-            cols_t2 = ['buyFromVendorNo', 'VendorName', 'amount', 'amountIncludingVAT', 'postingDate', 'aging_days', 'no', 'days_since_last_receiving', 'Status']
-            view_df2 = df_t2.reindex(columns=cols_t2)
+            if 'no' not in df_t2.columns:
+                df_t2['no'] = "N/A"
 
-            st.dataframe(
-                view_df2, 
-                use_container_width=True, hide_index=True,
-                column_config={
-                    "amount": st.column_config.NumberColumn(format="%,.2f"), 
-                    "amountIncludingVAT": st.column_config.NumberColumn(format="%,.2f"), 
-                    "postingDate": st.column_config.DateColumn(format="YYYY-MM-DD")
-                }
-            )
-            st.download_button("Download Collected CNs (CSV)", data=convert_df_to_csv(view_df2), file_name="Collected_CNs.csv", mime="text/csv", key="dl_t2")
-        else: 
-            st.write("No collected records identified for the selected criteria.")
-            
-    with tab3:
+            merged_frames.append(df_t2[['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no',
+                                         'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days']])
+
+        # ---- Source 2: Linked with PO (matched for direct deduction, not yet closed) ----
         if not filtered_linked.empty:
             df_t3 = filtered_linked.copy()
             df_t3['VendorName'] = df_t3['buyFromVendorNo'].map(vendor_mapping).fillna("Unknown Vendor")
-            
-            if 'documentDate' in df_t3.columns:
-                df_t3['documentDate'] = pd.to_datetime(df_t3['documentDate'], errors='coerce')
-                df_t3['Aging'] = (pd.to_datetime('today') - df_t3['documentDate']).dt.days
-            else:
-                df_t3['documentDate'] = pd.NaT
-                df_t3['Aging'] = 0
+            df_t3['CN_Category'] = 'Linked PO'
 
-            if 'amount' not in df_t3.columns: 
+            if 'documentDate' in df_t3.columns:
+                df_t3['Document_Date'] = pd.to_datetime(df_t3['documentDate'], errors='coerce')
+            else:
+                df_t3['Document_Date'] = pd.NaT
+            df_t3['Aging_Days'] = (pd.to_datetime('today') - df_t3['Document_Date']).dt.days
+
+            if 'amount' not in df_t3.columns:
                 df_t3['amount'] = 0.0
             vat_cols = [c for c in df_t3.columns if 'vat' in str(c).lower()]
-            if 'AmountWithVAT' in df_t3.columns: 
+            if 'AmountWithVAT' in df_t3.columns:
                 pass
-            elif 'amountIncludingVAT' in df_t3.columns: 
+            elif 'amountIncludingVAT' in df_t3.columns:
                 df_t3['AmountWithVAT'] = df_t3['amountIncludingVAT']
-            elif vat_cols: 
+            elif vat_cols:
                 df_t3['AmountWithVAT'] = df_t3[vat_cols[0]]
-            else: 
+            else:
                 df_t3['AmountWithVAT'] = 0.0
 
-            if 'locationCode' not in df_t3.columns: 
-                df_t3['locationCode'] = "N/A"
-            if 'Status' not in df_t3.columns: 
-                df_t3['Status'] = 'Linked with PO'
+            loc_col_t3 = 'locationCode' if 'locationCode' in df_t3.columns else ('location_code' if 'location_code' in df_t3.columns else None)
+            df_t3['Location_Code'] = df_t3[loc_col_t3] if loc_col_t3 else "N/A"
 
-            cols_t3 = ['buyFromVendorNo', 'VendorName', 'documentDate', 'no', 'locationCode', 'amount', 'AmountWithVAT', 'Status', 'Aging']
-            view_df3 = df_t3.reindex(columns=cols_t3)
+            if 'no' not in df_t3.columns:
+                df_t3['no'] = "N/A"
 
-            st.dataframe(
-                view_df3, 
-                use_container_width=True, hide_index=True,
-                column_config={
-                    "amount": st.column_config.NumberColumn(format="%,.2f"), 
-                    "AmountWithVAT": st.column_config.NumberColumn(format="%,.2f"), 
-                    "documentDate": st.column_config.DateColumn(format="YYYY-MM-DD")
-                }
-            )
-            st.download_button("Download Linked PO CNs (CSV)", data=convert_df_to_csv(view_df3), file_name="Linked_PO_CNs.csv", mime="text/csv", key="dl_t3")
-        else: 
-            st.write("No Linked PO discrepancies found.")
+            merged_frames.append(df_t3[['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no',
+                                         'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days']])
 
-    with tab4:
+        # ---- Source 3: Supplier Damage (awaiting CN) ----
         if not filtered_damage.empty:
             df_t4_dmg = filtered_damage.copy()
             df_t4_dmg['VendorName'] = df_t4_dmg['buyFromVendorNo'].map(vendor_mapping).fillna("Unknown Vendor")
-            
-            d_col = 'documentDate' if 'documentDate' in df_t4_dmg.columns else ('postingDate' if 'postingDate' in df_t4_dmg.columns else None)
-            if d_col:
-                df_t4_dmg['documentDate'] = pd.to_datetime(df_t4_dmg[d_col], errors='coerce')
-                df_t4_dmg['Aging'] = (pd.to_datetime('today') - df_t4_dmg['documentDate']).dt.days
-            else:
-                df_t4_dmg['documentDate'] = pd.NaT
-                df_t4_dmg['Aging'] = 0
+            df_t4_dmg['CN_Category'] = 'Supplier Damage'
 
-            if 'amount' not in df_t4_dmg.columns: 
+            d_col = 'documentDate' if 'documentDate' in df_t4_dmg.columns else ('postingDate' if 'postingDate' in df_t4_dmg.columns else None)
+            df_t4_dmg['Document_Date'] = pd.to_datetime(df_t4_dmg[d_col], errors='coerce') if d_col else pd.NaT
+            df_t4_dmg['Aging_Days'] = (pd.to_datetime('today') - df_t4_dmg['Document_Date']).dt.days
+
+            if 'amount' not in df_t4_dmg.columns:
                 df_t4_dmg['amount'] = 0.0
             vat_cols = [c for c in df_t4_dmg.columns if 'vat' in str(c).lower()]
-            if 'AmountWithVAT' in df_t4_dmg.columns: 
+            if 'AmountWithVAT' in df_t4_dmg.columns:
                 pass
-            elif 'amountIncludingVAT' in df_t4_dmg.columns: 
+            elif 'amountIncludingVAT' in df_t4_dmg.columns:
                 df_t4_dmg['AmountWithVAT'] = df_t4_dmg['amountIncludingVAT']
-            elif vat_cols: 
+            elif vat_cols:
                 df_t4_dmg['AmountWithVAT'] = df_t4_dmg[vat_cols[0]]
-            else: 
+            else:
                 df_t4_dmg['AmountWithVAT'] = 0.0
 
-            loc_col = 'locationCode' if 'locationCode' in df_t4_dmg.columns else ('location_code' if 'location_code' in df_t4_dmg.columns else None)
-            if not loc_col or loc_col not in df_t4_dmg.columns:
-                df_t4_dmg['locationCode'] = "N/A"
-            else:
-                df_t4_dmg['locationCode'] = df_t4_dmg[loc_col]
+            loc_col_t4 = 'locationCode' if 'locationCode' in df_t4_dmg.columns else ('location_code' if 'location_code' in df_t4_dmg.columns else None)
+            df_t4_dmg['Location_Code'] = df_t4_dmg[loc_col_t4] if loc_col_t4 else "N/A"
 
-            if 'Status' not in df_t4_dmg.columns: 
-                df_t4_dmg['Status'] = 'Supplier Damage (Awaiting CN)'
+            if 'no' not in df_t4_dmg.columns:
+                df_t4_dmg['no'] = "N/A"
 
-            cols_t4_dmg = ['buyFromVendorNo', 'VendorName', 'documentDate', 'no', 'locationCode', 'amount', 'AmountWithVAT', 'Status', 'Aging']
-            cols_t4_dmg = [c for c in cols_t4_dmg if c in df_t4_dmg.columns]
-            view_df4_dmg = df_t4_dmg.reindex(columns=cols_t4_dmg)
+            merged_frames.append(df_t4_dmg[['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no',
+                                             'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days']])
+
+        if merged_frames:
+            waiting_cn_df = pd.concat(merged_frames, ignore_index=True).sort_values('Aging_Days', ascending=False)
+
+            cat_filter = st.multiselect(
+                "Filter by CN Category:",
+                options=['Collected', 'Linked PO', 'Supplier Damage'],
+                default=['Collected', 'Linked PO', 'Supplier Damage'],
+                key="waiting_cn_cat_filter"
+            )
+            view_waiting_cn = waiting_cn_df[waiting_cn_df['CN_Category'].isin(cat_filter)]
 
             st.dataframe(
-                view_df4_dmg, 
+                view_waiting_cn,
                 use_container_width=True, hide_index=True,
                 column_config={
-                    "amount": st.column_config.NumberColumn(format="%,.2f"), 
-                    "AmountWithVAT": st.column_config.NumberColumn(format="%,.2f"), 
-                    "documentDate": st.column_config.DateColumn(format="YYYY-MM-DD")
+                    "buyFromVendorNo": "Vendor Code",
+                    "VendorName": "Vendor Name",
+                    "CN_Category": "CN Category",
+                    "no": "PRO / Document No.",
+                    "Location_Code": "Location Code",
+                    "amount": st.column_config.NumberColumn(format="%,.2f"),
+                    "AmountWithVAT": st.column_config.NumberColumn(format="%,.2f"),
+                    "Document_Date": st.column_config.DateColumn(format="YYYY-MM-DD"),
+                    "Aging_Days": st.column_config.NumberColumn("Aging (Days)")
                 }
             )
-            st.download_button("Download Supplier Damage (CSV)", data=convert_df_to_csv(view_df4_dmg), file_name="Supplier_Damage_CN_Awaiting.csv", mime="text/csv", key="dl_t4_dmg")
+            st.download_button(
+                "Download Waiting CNs (CSV)",
+                data=convert_df_to_csv(view_waiting_cn),
+                file_name="Waiting_CNs_Combined.csv",
+                mime="text/csv",
+                key="dl_waiting_cn"
+            )
         else:
-            st.write("No Supplier Damage records identified for the selected criteria.")
-        
-    with tab5:
+            st.write("No records awaiting a credit note across any of the three source categories.")
+
+    with tab3:
         global_linked_nos = df_linked['no'].unique() if ('no' in df_linked.columns and not df_linked.empty) else []
         global_returns_nos = df_returns['no'].unique() if ('no' in df_returns.columns and not df_returns.empty) else []
         global_damage_nos = df_supplier_damage['no'].unique() if ('no' in df_supplier_damage.columns and not df_supplier_damage.empty) else []
