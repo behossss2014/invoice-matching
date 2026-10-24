@@ -493,6 +493,7 @@ page = st.sidebar.radio("Select Module:", [
     "Data Analytics & Insights",
     "Executive Analytics",
     "Vendor SLA & Escalation Hub",
+    "Pending Orders & Returns",
     "Audit Trail & Logs"
 ])
 st.sidebar.markdown("---")
@@ -504,6 +505,546 @@ st.sidebar.caption(
 if st.sidebar.button("🔄 Refresh Data Now", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
+
+# ==========================================
+# PENDING ORDERS & RETURNS TRACKER
+# Data source: Pending.xlsx (a separate workbook from the main Returns sheet).
+# The page is self-contained: its own loader, its own filters, and it never
+# touches the data frames used by the other pages.
+# ==========================================
+PENDING_AGING_BINS = [0, 7, 14, 30, 60, 90, float("inf")]
+PENDING_AGING_LABELS = ["0–7 d", "8–14 d", "15–30 d", "31–60 d", "61–90 d", "90+ d"]
+PENDING_AGING_COLORS = {
+    "0–7 d": "#26C6A0", "8–14 d": "#8FD18A", "15–30 d": "#F2A93B",
+    "31–60 d": "#F08A3B", "61–90 d": "#F0553F", "90+ d": "#B02A1E",
+}
+PENDING_TYPE_COLORS = {"Return Order": "#F2A93B", "Order": "#6C8EBF"}
+
+
+def resolve_pending_file():
+    """Find the pending workbook next to app.py (tolerates case / naming variants)."""
+    for candidate in ("Pending.xlsx", "pending.xlsx", "Pending Sheet.xlsx", "Pending_Sheet.xlsx"):
+        if os.path.exists(candidate):
+            return candidate
+    for f in os.listdir("."):
+        low = f.lower()
+        if low.endswith(".xlsx") and "pending" in low:
+            return f
+    return None
+
+
+def prepare_pending_df(raw):
+    """Clean the raw sheet once: types, labels, aging buckets."""
+    df = raw.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    expected = ["no", "locationCode", "Location", "Vendor", "Name", "postingDate", "Amount",
+                "Type", "Aging", "vendorInvoiceNo", "vendorCrMemoNo", "Reason", "Issues"]
+    lower_map = {c.lower(): c for c in df.columns}
+    rename = {}
+    for want in expected:
+        have = lower_map.get(want.lower())
+        if have and have != want:
+            rename[have] = want
+    df = df.rename(columns=rename)
+
+    required = ["no", "Vendor", "Name", "postingDate", "Amount", "Type", "Aging"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError("missing required column(s): " + ", ".join(missing))
+    for optional in ["locationCode", "vendorInvoiceNo", "vendorCrMemoNo", "Reason", "Issues"]:
+        if optional not in df.columns:
+            df[optional] = pd.NA
+
+    df["no"] = df["no"].astype(str).str.strip()
+    df["Vendor"] = df["Vendor"].astype(str).str.strip()
+    df["Name"] = df["Name"].fillna("Unknown vendor").astype(str).apply(lambda s: " ".join(s.split()))
+    df["Type"] = df["Type"].astype(str).str.strip()
+    df["postingDate"] = pd.to_datetime(df["postingDate"], errors="coerce")
+    df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0.0)
+    df["Aging"] = pd.to_numeric(df["Aging"], errors="coerce").fillna(0).clip(lower=0).astype(int)
+
+    def _ref(v):
+        if pd.isna(v):
+            return "—"
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        return str(v).strip()
+
+    df["vendorInvoiceNo"] = df["vendorInvoiceNo"].apply(_ref)
+    df["vendorCrMemoNo"] = df["vendorCrMemoNo"].apply(_ref)
+    df["locationCode"] = df["locationCode"].fillna("N/A").astype(str).str.strip()
+    df["Reason"] = df["Reason"].apply(lambda v: "No reason logged" if pd.isna(v) or str(v).strip() == "" else str(v).strip())
+    df["Issues"] = df["Issues"].apply(lambda v: "—" if pd.isna(v) or str(v).strip() == "" else str(v).strip())
+    df["Aging Bucket"] = pd.cut(df["Aging"], bins=PENDING_AGING_BINS, labels=PENDING_AGING_LABELS, include_lowest=True)
+    df["Vendor Label"] = df["Vendor"] + " - " + df["Name"]
+    return df
+
+
+@st.cache_data(ttl=1800, show_spinner="Loading pending documents...")
+def load_pending_file(path, mtime):
+    # 'mtime' is only here so the cache refreshes the moment the file is replaced.
+    return prepare_pending_df(pd.read_excel(path))
+
+
+def pending_snapshot_date(df):
+    """The export date = posting date + aging (identical for every row in a clean export)."""
+    stamps = (df["postingDate"] + pd.to_timedelta(df["Aging"], unit="D")).dropna()
+    return stamps.mode().iloc[0] if not stamps.empty else pd.Timestamp.today().normalize()
+
+
+def _fmt_sar(v):
+    a = abs(v)
+    if a >= 1e6:
+        return f"{v / 1e6:,.2f}M"
+    if a >= 1e3:
+        return f"{v / 1e3:,.1f}K"
+    return f"{v:,.0f}"
+
+
+def render_pending_tracker():
+    AMBER, TEAL, CORAL, SLATE, BLUE = "#F2A93B", "#26C6A0", "#F0553F", "#8E97A6", "#6C8EBF"
+    GRID = "rgba(128, 128, 128, 0.18)"
+    AGE_SCALE = [[0, TEAL], [0.5, AMBER], [1, CORAL]]
+
+    st.markdown("<h2>Pending Orders & Returns Tracker</h2>", unsafe_allow_html=True)
+
+    # ---------- data source ----------
+    pending_path = resolve_pending_file()
+    with st.expander("Data source", expanded=(pending_path is None)):
+        uploaded = st.file_uploader("Load a newer Pending file (.xlsx)", type=["xlsx"], key="pend_upload")
+        st.caption("By default this page reads Pending.xlsx from the same folder as app.py. "
+                   "Upload a file here to override it for the current session.")
+
+    df_all, src_label = None, ""
+    try:
+        if uploaded is not None:
+            df_all = prepare_pending_df(pd.read_excel(uploaded))
+            src_label = "uploaded file · " + str(uploaded.name)
+        elif pending_path:
+            df_all = load_pending_file(pending_path, os.path.getmtime(pending_path))
+            src_label = os.path.basename(pending_path)
+    except Exception as exc:
+        st.error("Could not read the pending file: " + str(exc))
+        return
+
+    if df_all is None or df_all.empty:
+        st.info("Put **Pending.xlsx** next to app.py, or upload it in the *Data source* box above, to populate this page.")
+        return
+
+    as_of = pending_snapshot_date(df_all)
+    st.caption("Snapshot as of **" + as_of.strftime("%d %b %Y") + "** · " + f"{len(df_all):,}"
+               + " pending documents · source: " + src_label)
+
+    # ---------- filters ----------
+    max_age = int(max(df_all["Aging"].max(), 1))
+    f1, f2, f3, f4 = st.columns([1, 1, 1.2, 1.4])
+    with f1:
+        sel_types = st.multiselect("Document type", sorted(df_all["Type"].unique()), key="pend_f_type")
+    with f2:
+        sel_locs = st.multiselect("Location", sorted(df_all["locationCode"].unique()), key="pend_f_loc")
+    with f3:
+        sel_reasons = st.multiselect("Follow-up status", sorted(df_all["Reason"].unique()), key="pend_f_reason")
+    with f4:
+        search_q = st.text_input("Search vendor / document no.", key="pend_f_search").strip().lower()
+    g1, g2 = st.columns([2, 1])
+    with g1:
+        age_rng = st.slider("Aging (days)", 0, max_age, (0, max_age), key="pend_f_age")
+    with g2:
+        measure = st.radio("Charts show", ["Documents", "Value (SAR)"], horizontal=True, key="pend_measure")
+    st.caption("Leave a filter empty to include everything. Filters apply to every tab on this page.")
+    use_val = measure.startswith("Value")
+
+    df = df_all
+    if sel_types:
+        df = df[df["Type"].isin(sel_types)]
+    if sel_locs:
+        df = df[df["locationCode"].isin(sel_locs)]
+    if sel_reasons:
+        df = df[df["Reason"].isin(sel_reasons)]
+    df = df[(df["Aging"] >= age_rng[0]) & (df["Aging"] <= age_rng[1])]
+    if search_q:
+        hit = (df["Vendor Label"].str.lower().str.contains(search_q, na=False, regex=False)
+               | df["no"].str.lower().str.contains(search_q, na=False, regex=False))
+        df = df[hit]
+    df = df.copy()
+    if df.empty:
+        st.warning("No documents match the current filters.")
+        return
+
+    total_n = len(df)
+    total_v = float(df["Amount"].sum())
+    safe_v = total_v if total_v else 1.0
+    by_type = df.groupby("Type").agg(n=("no", "count"), v=("Amount", "sum"), a=("Aging", "mean"))
+    old = df[df["Aging"] > 30]
+
+    def _type_stats(t):
+        if t in by_type.index:
+            r = by_type.loc[t]
+            return int(r["n"]), float(r["v"]), float(r["a"])
+        return 0, 0.0, 0.0
+
+    ro_n, ro_v, ro_a = _type_stats("Return Order")
+    od_n, od_v, od_a = _type_stats("Order")
+
+    def _card(label, value, sub, spine, tip=""):
+        return (
+            '<div class="exec-banner-card" title="' + tip + '" style="border-left-color:' + spine
+            + ' !important; min-height:96px;">'
+            '<div class="exec-banner-label">' + label + '</div>'
+            '<div class="exec-banner-val" style="font-size:22px;">' + value + '</div>'
+            '<div style="font-size:11.5px; color:#8E97A6; margin-top:3px;">' + sub + '</div></div>'
+        )
+
+    def _insight(title, body, color):
+        return (
+            '<div class="alert-box" style="border-left-color:' + color + ' !important; margin-bottom:12px; min-height:118px;">'
+            '<div style="font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; opacity:.65; '
+            'font-weight:700; margin-bottom:6px;">' + title + '</div>'
+            '<div style="font-size:13.5px; font-weight:500; line-height:1.5;">' + body + '</div></div>'
+        )
+
+    # ---------- KPI strip ----------
+    kc = st.columns(6)
+    cards = [
+        ("Pending documents", f"{total_n:,}", f"{df['Vendor'].nunique():,} vendors", SLATE, ""),
+        ("Total pending value", _fmt_sar(total_v) + " SAR", f"avg {total_v / total_n:,.0f} SAR / document", SLATE, f"{total_v:,.2f} SAR"),
+        ("Return Orders", f"{ro_n:,}", f"{_fmt_sar(ro_v)} SAR · avg {ro_a:.1f} d", AMBER, f"{ro_v:,.2f} SAR"),
+        ("Orders", f"{od_n:,}", f"{_fmt_sar(od_v)} SAR · avg {od_a:.1f} d", BLUE, f"{od_v:,.2f} SAR"),
+        ("Average aging", f"{df['Aging'].mean():.1f} d", f"median {df['Aging'].median():.0f} d · oldest {int(df['Aging'].max())} d", SLATE, ""),
+        ("Older than 30 days", f"{len(old):,}", f"{_fmt_sar(float(old['Amount'].sum()))} SAR · {len(old) / total_n * 100:.0f}% of documents",
+         CORAL if len(old) else TEAL, f"{float(old['Amount'].sum()):,.2f} SAR"),
+    ]
+    for col, c in zip(kc, cards):
+        with col:
+            st.markdown(_card(*c), unsafe_allow_html=True)
+
+    # ---------- key takeaways (computed, never hard-coded) ----------
+    if len(old):
+        t_age = (f"<b>{len(old):,}</b> of {total_n:,} documents ({len(old) / total_n * 100:.0f}%) are older than 30 days, "
+                 f"worth <b>SAR {_fmt_sar(float(old['Amount'].sum()))}</b>.")
+    else:
+        t_age = "No document in the current view is older than 30 days."
+    t_val = "<br>".join(
+        f"<b>{t}</b> · SAR {_fmt_sar(float(r['v']))} ({r['v'] / safe_v * 100:.0f}%) · avg {r['a']:.1f} d"
+        for t, r in by_type.sort_values("v", ascending=False).iterrows()
+    )
+    rs_all = df.groupby("Reason").agg(n=("no", "count"), a=("Aging", "mean"))
+    top_reason = rs_all["n"].idxmax()
+    t_reason = f"Most common status: <b>{top_reason}</b> ({rs_all.loc[top_reason, 'n'] / total_n * 100:.0f}% of documents)."
+    slow = rs_all[rs_all["n"] >= 3]["a"]
+    if not slow.empty and slow.idxmax() != top_reason:
+        t_reason += f" Slowest to resolve: <b>{slow.idxmax()}</b>, averaging {slow.max():.0f} days."
+    vend_val = df.groupby("Vendor Label")["Amount"].sum().sort_values(ascending=False)
+    kk = min(5, len(vend_val))
+    t_vend = (f"Top {kk} vendors hold <b>{vend_val.head(kk).sum() / safe_v * 100:.0f}%</b> of the pending value; "
+              f"largest: <b>{vend_val.index[0].split(' - ', 1)[-1]}</b>.")
+    ic = st.columns(4)
+    for col, (ttl, body, clr) in zip(ic, [
+        ("Aging", t_age, CORAL if len(old) else TEAL),
+        ("Value by document type", t_val, AMBER),
+        ("Follow-up status", t_reason, BLUE),
+        ("Vendor concentration", t_vend, SLATE),
+    ]):
+        with col:
+            st.markdown(_insight(ttl, body, clr), unsafe_allow_html=True)
+
+    # ---------- chart helpers ----------
+    def _mcol(g):
+        return g["v"] if use_val else g["n"]
+
+    def _mtext(n, v):
+        return ("SAR " + _fmt_sar(float(v))) if use_val else f"{int(n):,}"
+
+    def _style(fig, height=330):
+        fig.update_layout(height=height, margin=dict(l=0, r=12, t=8, b=0),
+                          plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                          font=dict(family="Inter, sans-serif"), showlegend=False, bargap=0.3)
+        return fig
+
+    t_over, t_vend, t_loc, t_att, t_all = st.tabs(
+        ["Overview", "Vendors", "Locations", "Needs attention", "All documents"])
+
+    # =====================================================  OVERVIEW
+    with t_over:
+        o1, o2 = st.columns([1.5, 1])
+        with o1:
+            st.markdown("#### How old is the pending backlog?")
+            ag = (df.groupby("Aging Bucket", observed=False).agg(n=("no", "count"), v=("Amount", "sum"))
+                  .reindex(PENDING_AGING_LABELS).fillna(0))
+            fig = go.Figure(go.Bar(
+                x=list(ag.index), y=_mcol(ag).tolist(),
+                marker_color=[PENDING_AGING_COLORS[b] for b in ag.index],
+                text=[_mtext(r.n, r.v) for r in ag.itertuples()],
+                textposition="outside", cliponaxis=False,
+                customdata=ag[["n", "v"]].values,
+                hovertemplate="%{x}<br>%{customdata[0]:,.0f} documents<br>SAR %{customdata[1]:,.2f}<extra></extra>"))
+            _style(fig)
+            fig.update_yaxes(gridcolor=GRID, tickformat=",", rangemode="tozero")
+            st.plotly_chart(fig, use_container_width=True)
+        with o2:
+            st.markdown("#### Document type mix")
+            td = df.groupby("Type").agg(n=("no", "count"), v=("Amount", "sum")).reset_index()
+            fig = go.Figure(go.Pie(
+                labels=td["Type"].tolist(), values=(td["v"] if use_val else td["n"]).tolist(), hole=0.62, sort=False,
+                marker=dict(colors=[PENDING_TYPE_COLORS.get(t, SLATE) for t in td["Type"]]),
+                textinfo="percent", customdata=td[["n", "v"]].values,
+                hovertemplate="%{label}<br>%{customdata[0]:,.0f} documents<br>SAR %{customdata[1]:,.2f}<extra></extra>"))
+            fig.update_layout(
+                height=330, margin=dict(l=0, r=0, t=8, b=0), paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Inter, sans-serif"), showlegend=True,
+                legend=dict(orientation="h", y=-0.04, x=0.5, xanchor="center"),
+                annotations=[dict(text="<b>" + (_fmt_sar(total_v) if use_val else f"{total_n:,}") + "</b><br>"
+                                  + ("SAR" if use_val else "documents"),
+                                  x=0.5, y=0.5, showarrow=False, font=dict(size=15))])
+            st.plotly_chart(fig, use_container_width=True)
+
+        o3, o4 = st.columns([1.2, 1])
+        with o3:
+            st.markdown("#### Follow-up status")
+            st.caption("Bar colour = average aging (teal → amber → red; red means 60+ days).")
+            rs = (df.groupby("Reason").agg(n=("no", "count"), v=("Amount", "sum"), a=("Aging", "mean"), m=("Aging", "max"))
+                  .reset_index().sort_values("v" if use_val else "n", ascending=True))
+            xcol = rs["v"] if use_val else rs["n"]
+            fig = go.Figure(go.Bar(
+                y=rs["Reason"].tolist(), x=xcol.tolist(), orientation="h",
+                marker=dict(color=rs["a"].tolist(), colorscale=AGE_SCALE, cmin=0, cmax=60, showscale=False),
+                text=[f"{_mtext(r.n, r.v)} · avg {r.a:.0f} d" for r in rs.itertuples()],
+                textposition="outside", cliponaxis=False,
+                customdata=rs[["n", "v", "a", "m"]].values,
+                hovertemplate="%{y}<br>%{customdata[0]:,.0f} documents · SAR %{customdata[1]:,.2f}"
+                              "<br>avg %{customdata[2]:.1f} d · oldest %{customdata[3]:.0f} d<extra></extra>"))
+            _style(fig, 300)
+            fig.update_xaxes(gridcolor=GRID, tickformat=",", range=[0, float(xcol.max()) * 1.55 or 1])
+            st.plotly_chart(fig, use_container_width=True)
+        with o4:
+            st.markdown("#### Arrival of pending documents")
+            st.caption("Grouped by the week of the posting date.")
+            wk = df.dropna(subset=["postingDate"]).copy()
+            if wk.empty:
+                st.info("No posting dates available.")
+            else:
+                wk["week"] = wk["postingDate"].dt.to_period("W").dt.start_time
+                w = wk.groupby("week").agg(n=("no", "count"), v=("Amount", "sum"))
+                w = w.reindex(pd.date_range(w.index.min(), w.index.max(), freq="7D"), fill_value=0)
+                fig = go.Figure(go.Bar(
+                    x=w.index.tolist(), y=_mcol(w).tolist(), marker_color=AMBER,
+                    customdata=w[["n", "v"]].values,
+                    hovertemplate="Week of %{x|%d %b %Y}<br>%{customdata[0]:,.0f} documents<br>SAR %{customdata[1]:,.2f}<extra></extra>"))
+                _style(fig, 300)
+                fig.update_yaxes(gridcolor=GRID, tickformat=",", rangemode="tozero")
+                fig.update_xaxes(tickformat="%d %b")
+                st.plotly_chart(fig, use_container_width=True)
+
+    # =====================================================  VENDORS
+    with t_vend:
+        vh1, vh2, vh3 = st.columns([2.2, 1.2, 0.8])
+        with vh1:
+            st.markdown("#### Vendor ranking")
+        with vh2:
+            rank_by = st.selectbox("Rank by", ["Value (SAR)", "Documents", "Oldest aging"], key="pend_rank_by")
+        with vh3:
+            top_n = st.number_input("Top N", min_value=3, max_value=50, value=10, step=1, key="pend_topn")
+
+        va = df.groupby(["Vendor", "Name"]).agg(
+            Documents=("no", "count"), Value=("Amount", "sum"), AvgAging=("Aging", "mean"), Oldest=("Aging", "max"),
+            Over30=("Aging", lambda s: int((s > 30).sum())),
+            MainReason=("Reason", lambda s: s.value_counts().idxmax())).reset_index()
+        va["Share"] = va["Value"] / safe_v * 100
+        rank_col = {"Value (SAR)": "Value", "Documents": "Documents", "Oldest aging": "Oldest"}[rank_by]
+        va = va.sort_values([rank_col, "Value"], ascending=False).reset_index(drop=True)
+        topv = va.head(int(top_n))
+
+        fig = go.Figure(go.Bar(
+            y=[f"{r.Vendor} · {r.Name[:34]}" for r in topv.itertuples()],
+            x=topv[rank_col].tolist(), orientation="h",
+            marker=dict(color=topv["AvgAging"].tolist(), colorscale=AGE_SCALE, cmin=0, cmax=60, showscale=False),
+            text=[f"SAR {_fmt_sar(r.Value)} · {r.Documents} docs · avg {r.AvgAging:.0f} d" for r in topv.itertuples()],
+            textposition="outside", cliponaxis=False,
+            customdata=topv[["Documents", "Value", "AvgAging", "Oldest", "Over30"]].values,
+            hovertemplate="%{y}<br>%{customdata[0]:,.0f} documents · SAR %{customdata[1]:,.2f}"
+                          "<br>avg %{customdata[2]:.1f} d · oldest %{customdata[3]:.0f} d"
+                          "<br>%{customdata[4]:.0f} older than 30 d<extra></extra>"))
+        _style(fig, max(260, 34 * len(topv) + 40))
+        fig.update_yaxes(autorange="reversed")
+        fig.update_xaxes(gridcolor=GRID, tickformat=",", range=[0, float(topv[rank_col].max()) * 1.75 or 1])
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(f"Top {len(topv)} vendors = **{topv['Share'].sum():.0f}%** of the pending value "
+                   f"({len(topv)} of {len(va):,} vendors). Bar colour = average aging.")
+
+        st.markdown("#### All vendors")
+        vt = va.rename(columns={
+            "Vendor": "Vendor Code", "Name": "Vendor Name", "Value": "Value (SAR)", "Share": "Share of value",
+            "AvgAging": "Avg aging (d)", "Oldest": "Oldest (d)", "Over30": "> 30 d", "MainReason": "Main status"})
+        vt_cols = ["Vendor Code", "Vendor Name", "Documents", "Value (SAR)", "Share of value",
+                   "Avg aging (d)", "Oldest (d)", "> 30 d", "Main status"]
+
+        def _aging_style(col):
+            out = []
+            for v in col:
+                if v > 60:
+                    out.append("background-color: rgba(240,85,63,0.22); color:#F0553F; font-weight:700")
+                elif v > 30:
+                    out.append("background-color: rgba(240,138,59,0.20); color:#F08A3B; font-weight:600")
+                elif v > 14:
+                    out.append("background-color: rgba(242,169,59,0.16); color:#F2A93B; font-weight:600")
+                elif v <= 7:
+                    out.append("color:#26C6A0; font-weight:600")
+                else:
+                    out.append("")
+            return out
+
+        st.dataframe(
+            vt[vt_cols].style.format({"Value (SAR)": "{:,.2f}", "Avg aging (d)": "{:.1f}", "Oldest (d)": "{:,.0f}"})
+            .apply(_aging_style, subset=["Oldest (d)"]),
+            use_container_width=True, hide_index=True, height=420,
+            column_config={"Share of value": st.column_config.ProgressColumn(
+                "Share of value", format="%.1f%%", min_value=0.0, max_value=float(max(vt["Share of value"].max(), 1.0)))})
+        st.download_button("Download vendor summary (CSV)", data=convert_df_to_csv(vt[vt_cols]),
+                           file_name="Pending_Vendor_Summary.csv", mime="text/csv", key="pend_dl_vendors")
+
+    # =====================================================  LOCATIONS
+    with t_loc:
+        st.markdown("#### Where is the backlog sitting?")
+        lc = df.groupby(["locationCode", "Type"]).agg(n=("no", "count"), v=("Amount", "sum")).reset_index()
+        loc_order = (df.groupby("locationCode")["Amount" if use_val else "no"]
+                     .agg("sum" if use_val else "count").sort_values(ascending=False).index.tolist())
+        fig = go.Figure()
+        totals = {loc: 0.0 for loc in loc_order}
+        for t in sorted(lc["Type"].unique()):
+            sub = lc[lc["Type"] == t].set_index("locationCode").reindex(loc_order).fillna(0)
+            yv = (sub["v"] if use_val else sub["n"]).tolist()
+            for loc, val in zip(loc_order, yv):
+                totals[loc] += float(val)
+            fig.add_trace(go.Bar(
+                name=t, x=loc_order, y=yv, marker_color=PENDING_TYPE_COLORS.get(t, SLATE),
+                customdata=sub[["n", "v"]].values,
+                hovertemplate=t + "<br>%{x}<br>%{customdata[0]:,.0f} documents<br>SAR %{customdata[1]:,.2f}<extra></extra>"))
+        fig.add_trace(go.Scatter(
+            x=loc_order, y=[totals[loc] for loc in loc_order], mode="text", showlegend=False, hoverinfo="skip",
+            text=[("SAR " + _fmt_sar(totals[loc])) if use_val else f"{int(totals[loc]):,}" for loc in loc_order],
+            textposition="top center"))
+        _style(fig, 340)
+        fig.update_layout(barmode="stack", showlegend=True,
+                          legend=dict(orientation="h", y=1.08, x=0, xanchor="left"))
+        fig.update_yaxes(gridcolor=GRID, tickformat=",", rangemode="tozero")
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("#### Location × follow-up status")
+        piv = df.pivot_table(index="locationCode", columns="Reason", values="Amount" if use_val else "no",
+                             aggfunc="sum" if use_val else "count", fill_value=0)
+        piv = piv.loc[loc_order]
+        zt = [[("" if v == 0 else (_fmt_sar(float(v)) if use_val else f"{int(v):,}")) for v in row] for row in piv.values]
+        fig = go.Figure(go.Heatmap(
+            z=piv.values.tolist(), x=piv.columns.tolist(), y=piv.index.tolist(), text=zt, texttemplate="%{text}",
+            colorscale=[[0, "rgba(128,128,128,0.06)"], [1, AMBER]], showscale=False, xgap=3, ygap=3,
+            hovertemplate="%{y} · %{x}<br>" + ("SAR %{z:,.2f}" if use_val else "%{z:,.0f} documents") + "<extra></extra>"))
+        _style(fig, max(240, 54 * len(piv) + 70))
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("#### Location summary")
+        ls = df.groupby("locationCode").agg(
+            Documents=("no", "count"), Value=("Amount", "sum"), AvgAging=("Aging", "mean"),
+            Oldest=("Aging", "max"), Over30=("Aging", lambda s: int((s > 30).sum()))).reset_index()
+        ty = df.pivot_table(index="locationCode", columns="Type", values="no", aggfunc="count", fill_value=0).reset_index()
+        ls = ls.merge(ty, on="locationCode", how="left").sort_values("Value", ascending=False)
+        ls["Share of value"] = ls["Value"] / safe_v * 100
+        ls = ls.rename(columns={"locationCode": "Location", "Value": "Value (SAR)", "AvgAging": "Avg aging (d)",
+                                "Oldest": "Oldest (d)", "Over30": "> 30 d"})
+        type_cols = [c for c in ["Return Order", "Order"] if c in ls.columns]
+        ls_cols = ["Location", "Documents"] + type_cols + ["Value (SAR)", "Share of value", "Avg aging (d)", "Oldest (d)", "> 30 d"]
+        st.dataframe(
+            ls[ls_cols].style.format({"Value (SAR)": "{:,.2f}", "Avg aging (d)": "{:.1f}", "Oldest (d)": "{:,.0f}"})
+            .apply(_aging_style, subset=["Oldest (d)"]),
+            use_container_width=True, hide_index=True,
+            column_config={"Share of value": st.column_config.ProgressColumn(
+                "Share of value", format="%.1f%%", min_value=0.0, max_value=float(max(ls["Share of value"].max(), 1.0)))})
+
+    # =====================================================  NEEDS ATTENTION
+    with t_att:
+        st.markdown("#### Documents that have waited too long")
+        a1, a2 = st.columns([1, 1.6])
+        with a1:
+            thr = st.number_input("Aging threshold (days)", min_value=1, max_value=max(max_age, 1),
+                                  value=min(30, max(max_age, 1)), step=1, key="pend_thr")
+        with a2:
+            sort_mode = st.radio("Sort priority list by", ["Oldest first", "Largest value first"],
+                                 horizontal=True, key="pend_sort")
+        over = df[df["Aging"] > thr].copy()
+        if over.empty:
+            st.success("No document in the current view has waited more than " + str(int(thr)) + " days.")
+        else:
+            ac = st.columns(4)
+            att_cards = [
+                ("Overdue documents", f"{len(over):,}", f"older than {int(thr)} days", CORAL, ""),
+                ("Overdue value", _fmt_sar(float(over['Amount'].sum())) + " SAR", f"{over['Amount'].sum() / safe_v * 100:.0f}% of pending value", CORAL, f"{float(over['Amount'].sum()):,.2f} SAR"),
+                ("Vendors involved", f"{over['Vendor'].nunique():,}", f"of {df['Vendor'].nunique():,} with pending documents", AMBER, ""),
+                ("Longest wait", f"{int(over['Aging'].max())} d", "oldest document in view", AMBER, ""),
+            ]
+            for col, c in zip(ac, att_cards):
+                with col:
+                    st.markdown(_card(*c), unsafe_allow_html=True)
+
+            l1, l2 = st.columns([1.5, 1])
+            with l1:
+                st.markdown("#### Vendors with the most overdue documents")
+                vo = (over.groupby(["Vendor", "Name"]).agg(n=("no", "count"), v=("Amount", "sum"), m=("Aging", "max"))
+                      .reset_index().sort_values(["n", "v"], ascending=False).head(10))
+                fig = go.Figure(go.Bar(
+                    y=[f"{r.Vendor} · {r.Name[:30]}" for r in vo.itertuples()], x=vo["n"].tolist(), orientation="h",
+                    marker_color=CORAL,
+                    text=[f"{r.n} docs · SAR {_fmt_sar(r.v)} · oldest {r.m} d" for r in vo.itertuples()],
+                    textposition="outside", cliponaxis=False,
+                    customdata=vo[["n", "v", "m"]].values,
+                    hovertemplate="%{y}<br>%{customdata[0]:,.0f} overdue documents · SAR %{customdata[1]:,.2f}"
+                                  "<br>oldest %{customdata[2]:.0f} d<extra></extra>"))
+                _style(fig, max(240, 34 * len(vo) + 40))
+                fig.update_yaxes(autorange="reversed")
+                fig.update_xaxes(gridcolor=GRID, tickformat=",", range=[0, float(vo["n"].max()) * 1.9 or 1])
+                st.plotly_chart(fig, use_container_width=True)
+            with l2:
+                st.markdown("#### By follow-up status")
+                orr = (over.groupby("Reason").agg(Documents=("no", "count"), Value=("Amount", "sum"), AvgAging=("Aging", "mean"))
+                       .reset_index().sort_values("Documents", ascending=False)
+                       .rename(columns={"Reason": "Follow-up status", "Value": "Value (SAR)", "AvgAging": "Avg aging (d)"}))
+                st.dataframe(
+                    orr.style.format({"Value (SAR)": "{:,.2f}", "Avg aging (d)": "{:.1f}"}),
+                    use_container_width=True, hide_index=True)
+
+            st.markdown("#### Priority list")
+            pri = over.sort_values(["Aging", "Amount"] if sort_mode.startswith("Oldest") else ["Amount", "Aging"],
+                                   ascending=False)
+            pri_cols = ["no", "Type", "Vendor", "Name", "locationCode", "postingDate", "Aging", "Amount",
+                        "Reason", "Issues", "vendorCrMemoNo"]
+            pri_disp = pri[pri_cols].rename(columns={
+                "no": "Document No.", "Vendor": "Vendor Code", "Name": "Vendor Name", "locationCode": "Location",
+                "postingDate": "Posting Date", "Aging": "Aging (d)", "Amount": "Amount (SAR)",
+                "Reason": "Follow-up status", "vendorCrMemoNo": "Vendor CR Memo No."})
+            st.dataframe(
+                pri_disp.style.format({"Amount (SAR)": "{:,.2f}", "Aging (d)": "{:,.0f}", "Posting Date": "{:%Y-%m-%d}"}, na_rep="—")
+                .apply(_aging_style, subset=["Aging (d)"]),
+                use_container_width=True, hide_index=True, height=440)
+            st.download_button("Download priority list (CSV)", data=convert_df_to_csv(pri_disp),
+                               file_name="Pending_Priority_List.csv", mime="text/csv", key="pend_dl_priority")
+
+    # =====================================================  ALL DOCUMENTS
+    with t_all:
+        st.markdown("#### Every pending document in the current view")
+        allc = ["no", "Type", "Vendor", "Name", "locationCode", "postingDate", "Aging", "Amount",
+                "Reason", "Issues", "vendorInvoiceNo", "vendorCrMemoNo"]
+        all_disp = df.sort_values(["Aging", "Amount"], ascending=False)[allc].rename(columns={
+            "no": "Document No.", "Vendor": "Vendor Code", "Name": "Vendor Name", "locationCode": "Location",
+            "postingDate": "Posting Date", "Aging": "Aging (d)", "Amount": "Amount (SAR)",
+            "Reason": "Follow-up status", "vendorInvoiceNo": "Vendor Invoice No.", "vendorCrMemoNo": "Vendor CR Memo No."})
+        st.caption(f"{len(all_disp):,} documents · total {total_v:,.2f} SAR · sorted by aging, oldest first.")
+        st.dataframe(
+            all_disp.style.format({"Amount (SAR)": "{:,.2f}", "Aging (d)": "{:,.0f}", "Posting Date": "{:%Y-%m-%d}"}, na_rep="—")
+            .apply(_aging_style, subset=["Aging (d)"]),
+            use_container_width=True, hide_index=True, height=560)
+        st.download_button("Download all documents (CSV)", data=convert_df_to_csv(all_disp),
+                           file_name="Pending_Documents.csv", mime="text/csv", key="pend_dl_all")
+
+
 
 # ==========================================
 # PAGE 1: GATE OPERATIONS
@@ -1076,8 +1617,11 @@ elif page == "Data Analytics & Insights":
             if 'no' not in df_t2.columns:
                 df_t2['no'] = "N/A"
 
+            # Signed RTV copy link (Pending Returns sheet, 'URL' column)
+            df_t2['URL'] = df_t2['URL'] if 'URL' in df_t2.columns else None
+
             merged_frames.append(df_t2[['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no',
-                                         'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days']])
+                                         'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days', 'URL']])
 
         # ---- Source 2: Linked with PO (matched for direct deduction, not yet closed) ----
         if not filtered_linked.empty:
@@ -1109,8 +1653,11 @@ elif page == "Data Analytics & Insights":
             if 'no' not in df_t3.columns:
                 df_t3['no'] = "N/A"
 
+            # Linked_With_PO has no signed-copy link in the source sheet
+            df_t3['URL'] = df_t3['URL'] if 'URL' in df_t3.columns else None
+
             merged_frames.append(df_t3[['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no',
-                                         'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days']])
+                                         'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days', 'URL']])
 
         # ---- Source 3: Supplier Damage (awaiting CN) ----
         if not filtered_damage.empty:
@@ -1140,8 +1687,11 @@ elif page == "Data Analytics & Insights":
             if 'no' not in df_t4_dmg.columns:
                 df_t4_dmg['no'] = "N/A"
 
+            # Signed copy link (Supplier Damage sheet, 'URL' column)
+            df_t4_dmg['URL'] = df_t4_dmg['URL'] if 'URL' in df_t4_dmg.columns else None
+
             merged_frames.append(df_t4_dmg[['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no',
-                                             'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days']])
+                                             'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days', 'URL']])
 
         if merged_frames:
             waiting_cn_df = pd.concat(merged_frames, ignore_index=True).sort_values('Aging_Days', ascending=False)
@@ -1152,16 +1702,44 @@ elif page == "Data Analytics & Insights":
                 default=['Collected', 'Linked PO', 'Supplier Damage'],
                 key="waiting_cn_cat_filter"
             )
-            view_waiting_cn = waiting_cn_df[waiting_cn_df['CN_Category'].isin(cat_filter)]
+            view_waiting_cn = waiting_cn_df[waiting_cn_df['CN_Category'].isin(cat_filter)].copy()
+
+            # Clickable "signed copy" column. A link cell can only show text taken
+            # from the link itself, so the PRO number is appended to the URL as a
+            # harmless #fragment (never sent to the server) and extracted again as
+            # the visible text. Rows without a link stay empty.
+            def _signed_copy_link(url, pro_no):
+                url = "" if pd.isna(url) else str(url).strip()
+                if not url.lower().startswith("http"):
+                    return None
+                return url + "#" + str(pro_no).strip()
+
+            view_waiting_cn['Signed_Copy'] = [
+                _signed_copy_link(u, p) for u, p in zip(view_waiting_cn['URL'], view_waiting_cn['no'])
+            ]
+            missing_links = int(view_waiting_cn['Signed_Copy'].isna().sum())
+            st.caption(
+                "Click a PRO number in the **Signed Copy** column to open the receiver-signed copy. "
+                + (f"{missing_links:,} record(s) in this view have no link in the source sheet." if missing_links else "Every record in this view has a link.")
+            )
+
+            waiting_cols = ['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no', 'Signed_Copy',
+                            'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days']
 
             st.dataframe(
                 view_waiting_cn,
                 use_container_width=True, hide_index=True,
+                column_order=waiting_cols,
                 column_config={
                     "buyFromVendorNo": "Vendor Code",
                     "VendorName": "Vendor Name",
                     "CN_Category": "CN Category",
                     "no": "PRO / Document No.",
+                    "Signed_Copy": st.column_config.LinkColumn(
+                        "Signed Copy",
+                        help="Opens the receiver-signed copy (RTV / supplier damage document)",
+                        display_text=r"#(.*)$"
+                    ),
                     "Location_Code": "Location Code",
                     "amount": st.column_config.NumberColumn(format="%,.2f"),
                     "AmountWithVAT": st.column_config.NumberColumn(format="%,.2f"),
@@ -1171,7 +1749,7 @@ elif page == "Data Analytics & Insights":
             )
             st.download_button(
                 "Download Waiting CNs (CSV)",
-                data=convert_df_to_csv(view_waiting_cn),
+                data=convert_df_to_csv(view_waiting_cn.drop(columns=['Signed_Copy']).rename(columns={'URL': 'Signed Copy URL'})),
                 file_name="Waiting_CNs_Combined.csv",
                 mime="text/csv",
                 key="dl_waiting_cn"
@@ -3432,7 +4010,13 @@ elif page == "Vendor SLA & Escalation Hub":
                 )
 
 # ==========================================
-# PAGE 6: AUDIT TRAIL & LOGS
+# PAGE 6: PENDING ORDERS & RETURNS (Pending.xlsx)
+# ==========================================
+elif page == "Pending Orders & Returns":
+    render_pending_tracker()
+
+# ==========================================
+# PAGE 7: AUDIT TRAIL & LOGS
 # ==========================================
 elif page == "Audit Trail & Logs":
     st.markdown("<h2>System Audit Trail & Operations Log</h2>", unsafe_allow_html=True)
