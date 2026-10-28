@@ -1468,16 +1468,16 @@ elif page == "Data Analytics & Insights":
             filtered_damage = filtered_damage[filtered_damage['buyFromVendorNo'].isin(selected_codes)]
 
     if selected_locations:
-        if not filtered_df.empty and 'locationCode' in filtered_df.columns:
-            filtered_df = filtered_df[filtered_df['locationCode'].astype(str).isin(selected_locations)]
-        if not filtered_linked.empty and 'locationCode' in filtered_linked.columns:
-            filtered_linked = filtered_linked[filtered_linked['locationCode'].astype(str).isin(selected_locations)]
-        if not filtered_pros.empty and 'locationCode' in filtered_pros.columns:
-            filtered_pros = filtered_pros[filtered_pros['locationCode'].astype(str).isin(selected_locations)]
-        if not filtered_damage.empty:
-            loc_col = 'locationCode' if 'locationCode' in filtered_damage.columns else ('location_code' if 'location_code' in filtered_damage.columns else None)
-            if loc_col:
-                filtered_damage = filtered_damage[filtered_damage[loc_col].astype(str).isin(selected_locations)]
+        # The loader renames locationCode -> location_code, so accept either name.
+        def _apply_loc_filter(d):
+            if d is None or d.empty:
+                return d
+            col = 'locationCode' if 'locationCode' in d.columns else ('location_code' if 'location_code' in d.columns else None)
+            return d[d[col].astype(str).isin(selected_locations)] if col else d
+        filtered_df = _apply_loc_filter(filtered_df)
+        filtered_linked = _apply_loc_filter(filtered_linked)
+        filtered_pros = _apply_loc_filter(filtered_pros)
+        filtered_damage = _apply_loc_filter(filtered_damage)
 
     if selected_bins:
         if not filtered_df.empty and 'binCode' in filtered_df.columns:
@@ -1566,8 +1566,8 @@ elif page == "Data Analytics & Insights":
 
             if 'binCode' not in df_t1.columns: 
                 df_t1['binCode'] = "N/A"
-            if 'locationCode' not in df_t1.columns: 
-                df_t1['locationCode'] = "N/A"
+            _loc_src_t1 = 'locationCode' if 'locationCode' in df_t1.columns else ('location_code' if 'location_code' in df_t1.columns else None)
+            df_t1['locationCode'] = df_t1[_loc_src_t1] if _loc_src_t1 else "N/A"
             if 'Status' not in df_t1.columns: 
                 df_t1['Status'] = 'Pending for Collection'
 
@@ -1591,6 +1591,15 @@ elif page == "Data Analytics & Insights":
         st.write("All records still awaiting a credit note, from the three source processes, combined into one view. Use the **CN Category** column to filter by source.")
 
         merged_frames = []
+
+        def _ref_text(v):
+            # invoice / PO numbers can arrive as floats (1.0151e11) or text ('INV000...')
+            if pd.isna(v):
+                return None
+            if isinstance(v, float) and v.is_integer():
+                return str(int(v))
+            v = str(v).strip()
+            return v or None
 
         # ---- Source 1: Collected (RTV physically picked up, CN not yet posted) ----
         if not collected_df.empty:
@@ -1619,9 +1628,11 @@ elif page == "Data Analytics & Insights":
 
             # Signed RTV copy link (Pending Returns sheet, 'URL' column)
             df_t2['URL'] = df_t2['URL'] if 'URL' in df_t2.columns else None
+            df_t2['purchase_order_no'] = None
+            df_t2['vendor_invoice_no'] = None
 
             merged_frames.append(df_t2[['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no',
-                                         'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days', 'URL']])
+                                         'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days', 'URL', 'purchase_order_no', 'vendor_invoice_no']])
 
         # ---- Source 2: Linked with PO (matched for direct deduction, not yet closed) ----
         if not filtered_linked.empty:
@@ -1655,9 +1666,12 @@ elif page == "Data Analytics & Insights":
 
             # Linked_With_PO has no signed-copy link in the source sheet
             df_t3['URL'] = df_t3['URL'] if 'URL' in df_t3.columns else None
+            # PO number and vendor invoice number: vendors often ask for a credit note by these
+            for _c in ('purchase_order_no', 'vendor_invoice_no'):
+                df_t3[_c] = df_t3[_c].map(_ref_text) if _c in df_t3.columns else None
 
             merged_frames.append(df_t3[['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no',
-                                         'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days', 'URL']])
+                                         'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days', 'URL', 'purchase_order_no', 'vendor_invoice_no']])
 
         # ---- Source 3: Supplier Damage (awaiting CN) ----
         if not filtered_damage.empty:
@@ -1689,9 +1703,11 @@ elif page == "Data Analytics & Insights":
 
             # Signed copy link (Supplier Damage sheet, 'URL' column)
             df_t4_dmg['URL'] = df_t4_dmg['URL'] if 'URL' in df_t4_dmg.columns else None
+            df_t4_dmg['purchase_order_no'] = None
+            df_t4_dmg['vendor_invoice_no'] = None
 
             merged_frames.append(df_t4_dmg[['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no',
-                                             'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days', 'URL']])
+                                             'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days', 'URL', 'purchase_order_no', 'vendor_invoice_no']])
 
         if merged_frames:
             waiting_cn_df = pd.concat(merged_frames, ignore_index=True).sort_values('Aging_Days', ascending=False)
@@ -1702,7 +1718,12 @@ elif page == "Data Analytics & Insights":
                 default=['Collected', 'Linked PO', 'Supplier Damage'],
                 key="waiting_cn_cat_filter"
             )
+            wcn_search = st.text_input("Search PRO / PO number / vendor invoice no. / vendor", key="waiting_cn_search").strip().lower()
             view_waiting_cn = waiting_cn_df[waiting_cn_df['CN_Category'].isin(cat_filter)].copy()
+            if wcn_search:
+                _hay = (view_waiting_cn[['no', 'purchase_order_no', 'vendor_invoice_no', 'VendorName', 'buyFromVendorNo']]
+                        .fillna('').astype(str).agg(' '.join, axis=1).str.lower())
+                view_waiting_cn = view_waiting_cn[_hay.str.contains(wcn_search, regex=False)]
 
             # Clickable "signed copy" column. A link cell can only show text taken
             # from the link itself, so the PRO number is appended to the URL as a
@@ -1724,7 +1745,7 @@ elif page == "Data Analytics & Insights":
             )
 
             waiting_cols = ['buyFromVendorNo', 'VendorName', 'CN_Category', 'Document_Date', 'no', 'Signed_Copy',
-                            'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days']
+                            'purchase_order_no', 'vendor_invoice_no', 'Location_Code', 'amount', 'AmountWithVAT', 'Aging_Days']
 
             st.dataframe(
                 view_waiting_cn,
@@ -1735,6 +1756,8 @@ elif page == "Data Analytics & Insights":
                     "VendorName": "Vendor Name",
                     "CN_Category": "CN Category",
                     "no": "PRO / Document No.",
+                    "purchase_order_no": "PO Number",
+                    "vendor_invoice_no": "Vendor Invoice No.",
                     "Signed_Copy": st.column_config.LinkColumn(
                         "Signed Copy",
                         help="Opens the receiver-signed copy (RTV / supplier damage document)",
