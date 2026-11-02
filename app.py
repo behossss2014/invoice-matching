@@ -319,7 +319,7 @@ def convert_df_to_csv(df):
 # ==========================================
 # 2. Data Loading & Smart Processing
 # ==========================================
-@st.cache_data(ttl=1800, show_spinner="Loading workbook (this can take a while — 'Receiving Report per items' alone has 500K+ rows)...")
+@st.cache_data(ttl=1800, show_spinner="Loading workbook...")
 def load_all_sheets_live(file_path):
     if not os.path.exists(file_path): 
         return None, None, None, None, None, None, None, None
@@ -346,7 +346,17 @@ def load_all_sheets_live(file_path):
 
     def read_sheet(candidates):
         name = find_sheet(candidates)
-        return pd.read_excel(xls, sheet_name=name) if name else pd.DataFrame()
+        if not name:
+            return pd.DataFrame()
+        # Cheap probe first (reads ~100 rows and stops). A sheet whose data was
+        # cleared in Excel (Delete key) still carries every formatted-but-empty row
+        # in its XML — e.g. 520K of them — and pandas would walk through all of
+        # them (~27 s) only to return nothing. If the probe shows no data, skip
+        # the full parse and return the headers-only frame.
+        probe = pd.read_excel(xls, sheet_name=name, nrows=100)
+        if probe.dropna(how='all').empty:
+            return probe.iloc[0:0]
+        return pd.read_excel(xls, sheet_name=name)
 
     df_scheduled = read_sheet(['Next Day Scheduled'])
     df_returns = read_sheet(['Pending Returns'])
@@ -3521,7 +3531,7 @@ elif page == "Vendor SLA & Escalation Hub":
         )
 
         if df_receiving.empty:
-            st.info("The 'Receiving Report per items' sheet is not available, so a rejection rate cannot be computed.")
+            st.info("The 'Receiving Report per items' sheet is missing or has no data rows, so a rejection rate cannot be computed.")
         elif df_issues.empty or 'item_no' not in df_issues.columns:
             st.info("The 'pro_with_issues_linked_with_po_' sheet is not available, so a rejection rate cannot be computed.")
         else:
