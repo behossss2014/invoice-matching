@@ -1284,6 +1284,18 @@ elif page == "Today's Pre-Alerts":
             
             v_returns = df_returns[(df_returns['buyFromVendorNo'] == v_no) & (df_returns['Status'] == 'Pending for Collection')]
             ret_amt, ret_count = calculate_target_amounts(v_returns)
+
+            # Where the vendor's returns physically sit: the returns warehouse is split by
+            # location, so list every location that currently holds a return for this vendor
+            # (most returns first). The loader renames locationCode -> location_code, so accept both.
+            ret_locations = "—"
+            _loc_col = 'locationCode' if 'locationCode' in v_returns.columns else ('location_code' if 'location_code' in v_returns.columns else None)
+            if _loc_col and not v_returns.empty:
+                _locs = v_returns[_loc_col].dropna().astype(str).str.strip()
+                _locs = _locs[_locs != '']
+                if not _locs.empty:
+                    _vc = _locs.value_counts()
+                    ret_locations = ", ".join(sorted(_vc.index, key=lambda l: (-_vc[l], l)))
             
             v_collected = df_returns[(df_returns['buyFromVendorNo'] == v_no) & (df_returns['Status'] == 'Collected')].copy()
             v_linked = df_linked[df_linked['buyFromVendorNo'] == v_no].copy() if not df_linked.empty else pd.DataFrame()
@@ -1366,6 +1378,7 @@ elif page == "Today's Pre-Alerts":
                 "Vendor": row.get('buyFromVendorName', 'Unknown Vendor'),
                 "Returns Value (SAR)": ret_amt,
                 "PRO Count": ret_count,
+                "Return Location(s)": ret_locations,
                 "CN Balance (SAR)": total_cn_amt,
                 "CN Count": total_cn_count,
                 "CN Aging Status": cn_status_text,
