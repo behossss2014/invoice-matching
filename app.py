@@ -2184,6 +2184,129 @@ elif page == "Executive Analytics":
     else: 
         st.write("Insufficient data to generate chart.")
 
+    # ------------------------------------------------------------------
+    # All credit notes owed by each vendor, in one table: RTV (collected
+    # returns + supplier damage) and Receiving under adjustment (linked PRO/PO).
+    # ------------------------------------------------------------------
+    st.subheader("All Credit Notes Owed by Vendor")
+    st.caption("Every credit note still pending from a vendor — RTV (collected returns and supplier damage) and "
+               "Receiving under adjustment (PROs linked to a PO) — with how many, how much, and how old. "
+               "Follows the Observation Period above.")
+
+    def _cn_amount(d):
+        if 'amountIncludingVAT' in d.columns:
+            return pd.to_numeric(d['amountIncludingVAT'], errors='coerce').fillna(0.0)
+        cols = [c for c in d.columns if 'amount' in str(c).lower() and 'vat' in str(c).lower()] or \
+               [c for c in d.columns if 'amount' in str(c).lower()]
+        return pd.to_numeric(d[cols[0]], errors='coerce').fillna(0.0) if cols else pd.Series(0.0, index=d.index)
+
+    def _cn_date(d, prefer):
+        out = pd.Series(pd.NaT, index=d.index, dtype='datetime64[ns]')
+        for c in prefer:
+            if c in d.columns:
+                out = out.fillna(pd.to_datetime(d[c], errors='coerce'))
+        return out
+
+    _cn_today = pd.Timestamp.today().normalize()
+
+    def _build_cn(d, source, group, date_pref):
+        if d is None or d.empty or 'buyFromVendorNo' not in d.columns:
+            return None
+        dt = _cn_date(d, date_pref)
+        return pd.DataFrame({
+            'Vendor Code': d['buyFromVendorNo'].astype(str).values,
+            'CN Group': group,
+            'Source': source,
+            'Document No.': (d['no'].astype(str).values if 'no' in d.columns else ''),
+            'Date': dt.values,
+            'Amount': _cn_amount(d).values,
+            'Age': (_cn_today - dt).dt.days.values,
+        })
+
+    _cn_frames = [x for x in [
+        _build_cn(df_exec_filtered[df_exec_filtered['Status'] == 'Collected'], 'RTV – Collected', 'RTV', ['postingDate', 'documentDate']),
+        _build_cn(df_damage_exec, 'RTV – Supplier Damage', 'RTV', ['documentDate', 'postingDate']),
+        _build_cn(df_linked_exec, 'Receiving under adjustment', 'Receiving under adjustment', ['documentDate', 'postingDate']),
+    ] if x is not None]
+
+    if not _cn_frames:
+        st.info("No pending credit notes in the selected period.")
+    else:
+        all_cn = pd.concat(_cn_frames, ignore_index=True)
+        all_cn['Vendor Name'] = all_cn['Vendor Code'].map(vendor_mapping).fillna('Unknown Vendor')
+
+        ac1, ac2 = st.columns([1.3, 1])
+        with ac1:
+            grp_pick = st.multiselect("CN type", ['RTV', 'Receiving under adjustment'],
+                                      default=['RTV', 'Receiving under adjustment'], key="allcn_group")
+        with ac2:
+            cn_q = st.text_input("Search vendor name / code", key="allcn_search").strip().lower()
+
+        cn_view = all_cn[all_cn['CN Group'].isin(grp_pick)]
+        if cn_q:
+            cn_view = cn_view[cn_view['Vendor Code'].str.lower().str.contains(cn_q, regex=False)
+                              | cn_view['Vendor Name'].str.lower().str.contains(cn_q, regex=False)]
+
+        if cn_view.empty:
+            st.info("No credit notes match the current selection.")
+        else:
+            def _vendor_cn_row(g):
+                rtv = g[g['CN Group'] == 'RTV']
+                adj = g[g['CN Group'] != 'RTV']
+                return pd.Series({
+                    'Total CNs': len(g),
+                    'Total Amount (SAR)': g['Amount'].sum(),
+                    'Avg Age (d)': g['Age'].mean(),
+                    'Oldest (d)': g['Age'].max(),
+                    'Over 30 d (SAR)': g.loc[g['Age'] > 30, 'Amount'].sum(),
+                    'RTV CNs': len(rtv),
+                    'RTV Amount (SAR)': rtv['Amount'].sum(),
+                    'Adjustment CNs': len(adj),
+                    'Adjustment Amount (SAR)': adj['Amount'].sum(),
+                })
+
+            cn_summary = (cn_view.groupby(['Vendor Code', 'Vendor Name']).apply(_vendor_cn_row)
+                          .reset_index().sort_values('Total Amount (SAR)', ascending=False))
+            for _c in ('Total CNs', 'RTV CNs', 'Adjustment CNs'):
+                cn_summary[_c] = cn_summary[_c].astype(int)
+
+            sm1, sm2, sm3, sm4 = st.columns(4)
+            sm1.metric("Vendors owing credit notes", f"{len(cn_summary):,}")
+            sm2.metric("Credit notes pending", f"{int(cn_summary['Total CNs'].sum()):,}")
+            sm3.metric("Total amount", f"{cn_summary['Total Amount (SAR)'].sum():,.2f} SAR")
+            sm4.metric("Oldest credit note", f"{cn_summary['Oldest (d)'].max():.0f} days" if cn_summary['Oldest (d)'].notna().any() else "—")
+
+            st.dataframe(
+                cn_summary, use_container_width=True, hide_index=True, height=420,
+                column_config={
+                    "Total CNs": st.column_config.NumberColumn(format="%d"),
+                    "Total Amount (SAR)": st.column_config.NumberColumn(format="%,.2f"),
+                    "Avg Age (d)": st.column_config.NumberColumn(format="%.1f"),
+                    "Oldest (d)": st.column_config.NumberColumn(format="%.0f"),
+                    "Over 30 d (SAR)": st.column_config.NumberColumn(format="%,.2f"),
+                    "RTV CNs": st.column_config.NumberColumn(format="%d"),
+                    "RTV Amount (SAR)": st.column_config.NumberColumn(format="%,.2f"),
+                    "Adjustment CNs": st.column_config.NumberColumn("Receiving under adj. CNs", format="%d"),
+                    "Adjustment Amount (SAR)": st.column_config.NumberColumn("Receiving under adj. (SAR)", format="%,.2f"),
+                }
+            )
+            st.download_button("Download credit notes by vendor (CSV)", data=convert_df_to_csv(cn_summary),
+                               file_name="Credit_Notes_Owed_By_Vendor.csv", mime="text/csv", key="allcn_dl")
+
+            _choose = "— choose a vendor —"
+            vend_pick = st.selectbox("Show the individual credit notes for a vendor",
+                                     [_choose] + (cn_summary['Vendor Code'] + ' - ' + cn_summary['Vendor Name']).tolist(),
+                                     key="allcn_vendor")
+            if vend_pick != _choose:
+                det = (cn_view[cn_view['Vendor Code'] == vend_pick.split(' - ')[0]]
+                       .sort_values('Age', ascending=False)[['Source', 'Document No.', 'Date', 'Age', 'Amount']]
+                       .rename(columns={'Age': 'Age (d)', 'Amount': 'Amount (SAR)'}))
+                st.dataframe(det, use_container_width=True, hide_index=True,
+                             column_config={"Date": st.column_config.DateColumn(format="YYYY-MM-DD"),
+                                            "Age (d)": st.column_config.NumberColumn(format="%.0f"),
+                                            "Amount (SAR)": st.column_config.NumberColumn(format="%,.2f")})
+    st.markdown("---")
+
     # MATRIX 1: Pending Returns
     st.subheader("Advanced Aging Summary Matrix - Pending Returns")
 
